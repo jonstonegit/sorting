@@ -19,3 +19,18 @@ class UnknownCaseTypeError(SortingEngineError):
 
 class UnknownPrefixError(SortingEngineError):
     """Raised when an accession contains an unrecognized prefix."""
+
+class DuplicatePathologistError(ConfigurationError):
+    """Raised when a pathologist ID appears more than once in the roster."""
+
+
+class DuplicateStaffingLocationError(ConfigurationError):
+    """Raised when a location has multiple staffing records for one day."""
+
+
+class MultipleLocationAssignmentError(ConfigurationError):
+    """Raised when one pathologist is assigned to multiple locations."""
+
+
+class UnknownPathologistError(ConfigurationError):
+    """Raised when staffing references an unknown pathologist."""
