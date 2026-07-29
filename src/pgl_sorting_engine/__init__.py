@@ -1,5 +1,9 @@
 """PGL Sorting Engine."""
 
+from pgl_sorting_engine.eligibility import (
+    EligibilityResult,
+    EligibilityService,
+)
 from pgl_sorting_engine.enums import (
     LocationName,
     SubspecialtyRequirement,
@@ -10,8 +14,10 @@ from pgl_sorting_engine.exceptions import (
     DuplicateRuleError,
     DuplicateStaffingLocationError,
     MultipleLocationAssignmentError,
+    RoutingConflictError,
     SortingEngineError,
     UnknownCaseTypeError,
+    UnknownHospitalError,
     UnknownPathologistError,
     UnknownPrefixError,
 )
@@ -40,16 +46,20 @@ __all__ = [
     "DuplicatePathologistError",
     "DuplicateRuleError",
     "DuplicateStaffingLocationError",
+    "EligibilityResult",
+    "EligibilityService",
     "HospitalRoutingRule",
     "LocationCapability",
     "LocationName",
     "MultipleLocationAssignmentError",
     "Pathologist",
     "PrefixRoutingRule",
+    "RoutingConflictError",
     "RoutingRuleSet",
     "SortingEngineError",
     "SubspecialtyRequirement",
     "UnknownCaseTypeError",
+    "UnknownHospitalError",
     "UnknownPathologistError",
     "UnknownPrefixError",
-]
+    ]

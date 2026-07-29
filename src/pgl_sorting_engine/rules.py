@@ -12,8 +12,10 @@ from pgl_sorting_engine.exceptions import (
     ConfigurationError,
     DuplicateRuleError,
     UnknownCaseTypeError,
+    UnknownHospitalError,
     UnknownPrefixError,
 )
+from pgl_sorting_engine.models import HospitalRoutingRule
 from pgl_sorting_engine.validation import (
     _normalize_label,
     _normalize_two_letter_code,
@@ -168,20 +170,25 @@ class PrefixRoutingRule:
 @dataclass(frozen=True, slots=True)
 class RoutingRuleSet:
     """
-    Immutable, validated collection of case-type and prefix rules.
+    Immutable collection of case-type, prefix, and hospital routing rules.
 
-    Lookup indexes are created when the rule set is initialized. Duplicate
-    codes are rejected rather than silently replacing an earlier rule.
+    Duplicate codes and hospital names are rejected rather than silently
+    replacing an earlier rule.
     """
 
     case_type_rules: tuple[CaseTypeRule, ...]
     prefix_rules: tuple[PrefixRoutingRule, ...]
+    hospital_rules: tuple[HospitalRoutingRule, ...] = ()
 
     _case_type_index: Mapping[str, CaseTypeRule] = field(
         init=False,
         repr=False,
     )
     _prefix_index: Mapping[str, PrefixRoutingRule] = field(
+        init=False,
+        repr=False,
+    )
+    _hospital_index: Mapping[str, HospitalRoutingRule] = field(
         init=False,
         repr=False,
     )
@@ -209,6 +216,17 @@ class RoutingRuleSet:
 
             prefix_index[prefix_rule.prefix] = prefix_rule
 
+        hospital_index: dict[str, HospitalRoutingRule] = {}
+
+        for hospital_rule in self.hospital_rules:
+            if hospital_rule.hospital in hospital_index:
+                raise DuplicateRuleError(
+                    f"Duplicate hospital rule found for "
+                    f"{hospital_rule.hospital}."
+                )
+
+            hospital_index[hospital_rule.hospital] = hospital_rule
+
         object.__setattr__(
             self,
             "_case_type_index",
@@ -218,6 +236,11 @@ class RoutingRuleSet:
             self,
             "_prefix_index",
             MappingProxyType(prefix_index),
+        )
+        object.__setattr__(
+            self,
+            "_hospital_index",
+            MappingProxyType(hospital_index),
         )
 
     def get_case_type_rule(self, case_type: str) -> CaseTypeRule:
@@ -256,5 +279,26 @@ class RoutingRuleSet:
             return self._prefix_index[normalized_prefix]
         except KeyError as exc:
             raise UnknownPrefixError(
-                f"No routing rule is configured for prefix {normalized_prefix}."
+                f"No routing rule is configured for prefix "
+                f"{normalized_prefix}."
+            ) from exc
+
+    def get_hospital_rule(self, hospital: str) -> HospitalRoutingRule:
+        """
+        Return the routing rule for an originating hospital.
+
+        Raises:
+            UnknownHospitalError: If no rule exists for the hospital.
+        """
+        normalized_hospital = _normalize_label(
+            hospital,
+            "Hospital",
+        )
+
+        try:
+            return self._hospital_index[normalized_hospital]
+        except KeyError as exc:
+            raise UnknownHospitalError(
+                f"No routing rule is configured for hospital "
+                f"{normalized_hospital}."
             ) from exc

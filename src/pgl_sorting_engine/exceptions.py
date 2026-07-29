@@ -20,6 +20,7 @@ class UnknownCaseTypeError(SortingEngineError):
 class UnknownPrefixError(SortingEngineError):
     """Raised when an accession contains an unrecognized prefix."""
 
+
 class DuplicatePathologistError(ConfigurationError):
     """Raised when a pathologist ID appears more than once in the roster."""
 
@@ -34,3 +35,11 @@ class MultipleLocationAssignmentError(ConfigurationError):
 
 class UnknownPathologistError(ConfigurationError):
     """Raised when staffing references an unknown pathologist."""
+
+
+class UnknownHospitalError(SortingEngineError):
+    """Raised when an accession references an unconfigured hospital."""
+
+
+class RoutingConflictError(ConfigurationError):
+    """Raised when mandatory routing rules conflict with one another."""

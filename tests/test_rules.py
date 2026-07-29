@@ -6,11 +6,13 @@ from pgl_sorting_engine import (
     CaseTypeRule,
     ConfigurationError,
     DuplicateRuleError,
+    HospitalRoutingRule,
     LocationName,
     PrefixRoutingRule,
     RoutingRuleSet,
     SubspecialtyRequirement,
     UnknownCaseTypeError,
+    UnknownHospitalError,
     UnknownPrefixError,
 )
 
@@ -188,3 +190,52 @@ def test_unknown_prefix_raises_specific_error() -> None:
 
     with pytest.raises(UnknownPrefixError, match="ZZ"):
         rule_set.get_prefix_rule("ZZ")
+
+
+def test_rule_set_returns_hospital_rule() -> None:
+    hospital_rule = HospitalRoutingRule(
+        hospital="Hospital A",
+        allowed_locations=frozenset(
+            {
+                LocationName.OLOL,
+                LocationName.BRG,
+            }
+        ),
+    )
+
+    rule_set = RoutingRuleSet(
+        case_type_rules=(),
+        prefix_rules=(),
+        hospital_rules=(hospital_rule,),
+    )
+
+    assert rule_set.get_hospital_rule(" hospital a ") is hospital_rule
+
+
+def test_rule_set_rejects_duplicate_hospitals() -> None:
+    first = HospitalRoutingRule(
+        hospital="Hospital A",
+        allowed_locations=frozenset({LocationName.OLOL}),
+    )
+    second = HospitalRoutingRule(
+        hospital=" hospital a ",
+        allowed_locations=frozenset({LocationName.BRG}),
+    )
+
+    with pytest.raises(DuplicateRuleError, match="Duplicate hospital"):
+        RoutingRuleSet(
+            case_type_rules=(),
+            prefix_rules=(),
+            hospital_rules=(first, second),
+        )
+
+
+def test_unknown_hospital_raises_specific_error() -> None:
+    rule_set = RoutingRuleSet(
+        case_type_rules=(),
+        prefix_rules=(),
+        hospital_rules=(),
+    )
+
+    with pytest.raises(UnknownHospitalError, match="HOSPITAL A"):
+        rule_set.get_hospital_rule("Hospital A")
