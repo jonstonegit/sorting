@@ -18,3 +18,9 @@ class SubspecialtyRequirement(StrEnum):
     REQUIRED = "required"
     PREFERRED = "preferred"
     NOT_REQUIRED = "not_required"
+
+class AssignmentMethod(StrEnum):
+    """Describe how an accession received its final location."""
+
+    MANDATORY = "mandatory"
+    WEIGHT_BALANCED = "weight_balanced"

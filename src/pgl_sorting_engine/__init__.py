@@ -1,21 +1,38 @@
 """PGL Sorting Engine."""
 
+from pgl_sorting_engine.assignment import (
+    AssignmentResult,
+    LocationSortingSummary,
+    SortingEngine,
+    SortingRunResult,
+    UnassignedAccession,
+)
 from pgl_sorting_engine.eligibility import (
     EligibilityResult,
     EligibilityService,
 )
 from pgl_sorting_engine.enums import (
+    AssignmentMethod,
     LocationName,
     SubspecialtyRequirement,
 )
+from pgl_sorting_engine.excel_loader import (
+    DailySortingData,
+    SortingConfigurationData,
+    SortingInputData,
+    load_sorting_workbooks,
+)
 from pgl_sorting_engine.exceptions import (
     ConfigurationError,
+    DuplicateAccessionError,
     DuplicatePathologistError,
     DuplicateRuleError,
     DuplicateStaffingLocationError,
     MultipleLocationAssignmentError,
     RoutingConflictError,
     SortingEngineError,
+    SpreadsheetIssue,
+    SpreadsheetValidationError,
     UnknownCaseTypeError,
     UnknownHospitalError,
     UnknownPathologistError,
@@ -62,4 +79,17 @@ __all__ = [
     "UnknownHospitalError",
     "UnknownPathologistError",
     "UnknownPrefixError",
+    "AssignmentMethod",
+    "AssignmentResult",
+    "DuplicateAccessionError",
+    "LocationSortingSummary",
+    "SortingEngine",
+    "SortingRunResult",
+    "UnassignedAccession",
+    "DailySortingData",
+    "SortingConfigurationData",
+    "SortingInputData",
+    "SpreadsheetIssue",
+    "SpreadsheetValidationError",
+    "load_sorting_workbooks",
     ]
