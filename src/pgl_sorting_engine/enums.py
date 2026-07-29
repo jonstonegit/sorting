@@ -11,3 +11,10 @@ class LocationName(StrEnum):
     MET = "MET"
     TEX = "TEX"
     OMEGA = "OMEGA"
+
+class SubspecialtyRequirement(StrEnum):
+    """Describe how subspecialty coverage affects case routing."""
+
+    REQUIRED = "required"
+    PREFERRED = "preferred"
+    NOT_REQUIRED = "not_required"

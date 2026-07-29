@@ -1,85 +1,15 @@
 """Core domain models for the PGL Sorting Engine."""
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from pgl_sorting_engine.enums import LocationName
-
-
-def _normalize_required_text(value: str, field_name: str) -> str:
-    """
-    Strip surrounding whitespace and verify that required text is present.
-
-    Args:
-        value: The text to normalize.
-        field_name: Human-readable field name used in error messages.
-
-    Returns:
-        The normalized text.
-
-    Raises:
-        TypeError: If the supplied value is not a string.
-        ValueError: If the normalized value is empty.
-    """
-    if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be a string.")
-
-    normalized = value.strip()
-
-    if not normalized:
-        raise ValueError(f"{field_name} cannot be empty.")
-
-    return normalized
-
-
-def _normalize_two_letter_code(value: str, field_name: str) -> str:
-    """
-    Normalize and validate a two-letter accession code.
-
-    Prefixes and case types are stored in uppercase so values such as
-    ``gi``, ``Gi``, and ``GI`` are treated consistently.
-    """
-    normalized = _normalize_required_text(value, field_name).upper()
-
-    if len(normalized) != 2 or not normalized.isalpha():
-        raise ValueError(
-            f"{field_name} must contain exactly two letters; received {value!r}."
-        )
-
-    return normalized
-
-
-def _normalize_label(value: str, field_name: str) -> str:
-    """
-    Normalize a configurable label such as a subspecialty name.
-
-    Consecutive internal whitespace is reduced to a single space.
-    """
-    normalized = _normalize_required_text(value, field_name)
-    return " ".join(normalized.split()).upper()
-
-
-def _coerce_positive_decimal(value: object, field_name: str) -> Decimal:
-    """
-    Convert a numeric value to a positive finite Decimal.
-
-    Decimal is used instead of binary floating-point arithmetic so repeated
-    workload additions remain predictable.
-    """
-    try:
-        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} must be a valid numeric value; received {value!r}."
-        ) from exc
-
-    if not decimal_value.is_finite():
-        raise ValueError(f"{field_name} must be finite.")
-
-    if decimal_value <= 0:
-        raise ValueError(f"{field_name} must be greater than zero.")
-
-    return decimal_value
+from pgl_sorting_engine.validation import (
+    _coerce_positive_decimal,
+    _normalize_label,
+    _normalize_required_text,
+    _normalize_two_letter_code,
+)
 
 
 @dataclass(frozen=True, slots=True)
