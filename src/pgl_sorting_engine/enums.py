@@ -8,8 +8,9 @@ class LocationName(StrEnum):
 
     OLOL = "OLOL"
     BRG = "BRG"
+    WH = "WH"
     MET = "MET"
-    TEX = "TEX"
+    TEXAS = "TEXAS"
     OMEGA = "OMEGA"
 
 class SubspecialtyRequirement(StrEnum):

@@ -33,8 +33,9 @@ MAX_INPUT_ROW = 1000
 LOCATIONS = (
     "OLOL",
     "BRG",
+    "WH",
     "MET",
-    "TEX",
+    "TEXAS",
     "OMEGA",
 )
 
@@ -200,7 +201,8 @@ def create_configuration_template(
     )
 
     location_formula = (
-        f"{quote_sheetname('Lists')}!$A$2:$A$6"
+        f"{quote_sheetname('Lists')}!"
+        f"$A$2:$A${len(LOCATIONS) + 1}"
     )
     requirement_formula = (
         f"{quote_sheetname('Lists')}!$B$2:$B$4"
@@ -312,7 +314,8 @@ def create_daily_template(
     )
 
     location_formula = (
-        f"{quote_sheetname('Lists')}!$A$2:$A$6"
+        f"{quote_sheetname('Lists')}!"
+        f"$A$2:$A${len(LOCATIONS) + 1}"
     )
 
     _add_list_validation(
@@ -404,9 +407,7 @@ def _configure_input_sheet(
 
     worksheet.add_table(table)
 
-    worksheet.auto_filter.ref = (
-        f"A1:{last_column}{MAX_INPUT_ROW}"
-    )
+    
 
 
 def _add_list_validation(

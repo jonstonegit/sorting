@@ -159,11 +159,11 @@ def test_inactive_location_is_excluded() -> None:
     accession = build_accession(case_type="GC")
     result = service.evaluate(accession)
 
-    assert LocationName.TEX not in result.eligible_locations
-    assert result.reasons_for_exclusion(LocationName.TEX) == (
-        "Hospital HOSPITAL A does not allow TEX.",
-        "Prefix AB does not allow TEX.",
-        "No pathologists are staffed at TEX.",
+    assert LocationName.TEXAS not in result.eligible_locations
+    assert result.reasons_for_exclusion(LocationName.TEXAS) == (
+        "Hospital HOSPITAL A does not allow TEXAS.",
+        "Prefix AB does not allow TEXAS.",
+        "No pathologists are staffed at TEXAS.",
     )
 
 
@@ -262,12 +262,12 @@ def test_mandatory_location_may_be_operationally_unavailable() -> None:
     service = build_service(
         hospital_rule=HospitalRoutingRule(
             hospital="Hospital A",
-            allowed_locations=frozenset({LocationName.TEX}),
-            required_location=LocationName.TEX,
+            allowed_locations=frozenset({LocationName.TEXAS}),
+            required_location=LocationName.TEXAS,
         ),
         prefix_rule=PrefixRoutingRule(
             prefix="AB",
-            allowed_locations=frozenset({LocationName.TEX}),
+            allowed_locations=frozenset({LocationName.TEXAS}),
         ),
         case_rule=CaseTypeRule(
             case_type="GC",
@@ -282,8 +282,8 @@ def test_mandatory_location_may_be_operationally_unavailable() -> None:
 
     assert result.eligible_locations == frozenset()
     assert result.is_assignable is False
-    assert result.reasons_for_exclusion(LocationName.TEX) == (
-        "No pathologists are staffed at TEX.",
+    assert result.reasons_for_exclusion(LocationName.TEXAS) == (
+        "No pathologists are staffed at TEXAS.",
     )
 
 

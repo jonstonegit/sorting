@@ -131,7 +131,7 @@ def test_locations_with_subspecialty_filters_locations() -> None:
                 pathologist_ids=("AB",),
             ),
             DailyLocationStaffing(
-                location=LocationName.TEX,
+                location=LocationName.TEXAS,
                 pathologist_ids=("CD",),
             ),
         ),
@@ -144,7 +144,7 @@ def test_locations_with_subspecialty_filters_locations() -> None:
 
     assert gi_locations == {
         LocationName.OLOL,
-        LocationName.TEX,
+        LocationName.TEXAS,
     }
 
 
