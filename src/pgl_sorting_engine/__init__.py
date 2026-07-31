@@ -53,6 +53,11 @@ from pgl_sorting_engine.staffing import (
     DailySortingContext,
     LocationCapability,
 )
+from pgl_sorting_engine.templates import (
+    create_configuration_template,
+    create_daily_template,
+    create_sorting_templates,
+)
 
 __all__ = [
     "Accession",
@@ -92,4 +97,7 @@ __all__ = [
     "SpreadsheetIssue",
     "SpreadsheetValidationError",
     "load_sorting_workbooks",
+    "create_configuration_template",
+    "create_daily_template",
+    "create_sorting_templates",
     ]
