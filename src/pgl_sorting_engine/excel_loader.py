@@ -5,12 +5,17 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
+from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 from openpyxl.utils.exceptions import InvalidFileException  # type: ignore[import-untyped]
+from openpyxl.worksheet.worksheet import Worksheet
 
-from pgl_sorting_engine.assignment import SortingEngine
 from pgl_sorting_engine.eligibility import EligibilityService
+from pgl_sorting_engine.assignment import (
+    AssignmentSettings,
+    SortingEngine,
+)
 from pgl_sorting_engine.enums import (
     LocationName,
     SubspecialtyRequirement,
@@ -75,6 +80,8 @@ STAFFING_HEADERS = (
     "pathologist_id",
 )
 
+ASSIGNMENT_SETTINGS_SHEET = "AssignmentSettings"
+
 
 @dataclass(frozen=True, slots=True)
 class SortingConfigurationData:
@@ -84,6 +91,7 @@ class SortingConfigurationData:
     case_type_rules: tuple[CaseTypeRule, ...]
     prefix_rules: tuple[PrefixRoutingRule, ...]
     hospital_rules: tuple[HospitalRoutingRule, ...]
+    assignment_settings: AssignmentSettings
 
     def build_rule_set(self) -> RoutingRuleSet:
         """Build the validated routing-rule collection."""
@@ -240,6 +248,118 @@ def load_sorting_workbooks(
         raise SpreadsheetValidationError(tuple(issues))
 
     return data
+
+def _load_assignment_settings(
+    worksheet: Worksheet,
+) -> AssignmentSettings:
+    """Load MET and WH assignment values from Excel."""
+
+    required_headers = (
+        "met_weight_per_pathologist",
+        "wh_starting_weight",
+    )
+
+    header_columns = {
+        str(cell.value).strip(): cell.column
+        for cell in worksheet[1]
+        if cell.value is not None
+    }
+
+    missing_headers = [
+        header
+        for header in required_headers
+        if header not in header_columns
+    ]
+
+    if missing_headers:
+        missing_text = ", ".join(missing_headers)
+
+        raise ValueError(
+            f"{ASSIGNMENT_SETTINGS_SHEET} is missing "
+            f"required column(s): {missing_text}."
+        )
+
+    populated_rows = [
+        row_number
+        for row_number in range(
+            2,
+            worksheet.max_row + 1,
+        )
+        if any(
+            worksheet.cell(
+                row=row_number,
+                column=header_columns[header],
+            ).value
+            not in (None, "")
+            for header in required_headers
+        )
+    ]
+
+    if not populated_rows:
+        raise ValueError(
+            f"{ASSIGNMENT_SETTINGS_SHEET} must contain "
+            "one settings row."
+        )
+
+    if len(populated_rows) > 1:
+        raise ValueError(
+            f"{ASSIGNMENT_SETTINGS_SHEET} must contain "
+            "only one settings row."
+        )
+
+    row_number = populated_rows[0]
+
+    met_raw = worksheet.cell(
+        row=row_number,
+        column=header_columns[
+            "met_weight_per_pathologist"
+        ],
+    ).value
+
+    wh_raw = worksheet.cell(
+        row=row_number,
+        column=header_columns[
+            "wh_starting_weight"
+        ],
+    ).value
+
+    try:
+        met_weight = Decimal(
+            str(met_raw).strip()
+        )
+        wh_starting_weight = Decimal(
+            str(wh_raw).strip()
+        )
+    except InvalidOperation as exc:
+        raise ValueError(
+            "MET weight per pathologist and WH starting "
+            "weight must be valid numbers."
+        ) from exc
+
+    if not met_weight.is_finite():
+        raise ValueError(
+            "met_weight_per_pathologist must be finite."
+        )
+
+    if not wh_starting_weight.is_finite():
+        raise ValueError(
+            "wh_starting_weight must be finite."
+        )
+
+    if met_weight < 0:
+        raise ValueError(
+            "met_weight_per_pathologist cannot be negative."
+        )
+
+    if wh_starting_weight < 0:
+        raise ValueError(
+            "wh_starting_weight cannot be negative."
+        )
+
+    return AssignmentSettings(
+        met_weight_per_pathologist=met_weight,
+        wh_starting_weight=wh_starting_weight,
+    )
 
 
 def _open_workbook(

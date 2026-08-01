@@ -1,7 +1,7 @@
 """Weighted accession assignment and sorting-run result models."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -18,21 +18,69 @@ from pgl_sorting_engine.models import Accession
 
 ZERO_WEIGHT = Decimal("0")
 
+BALANCED_LOCATIONS = (
+    LocationName.OLOL,
+    LocationName.BRG,
+    LocationName.WH,
+)
+SPECIAL_ONLY_LOCATIONS = frozenset(
+    {
+        LocationName.TEXAS,
+        LocationName.OMEGA,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AssignmentSettings:
+    """Editable business parameters used by the assignment algorithm."""
+
+    met_weight_per_pathologist: Decimal = Decimal("200")
+    wh_starting_weight: Decimal = Decimal("400")
+    texas_case_types: frozenset[str] = frozenset({"DP", "DS"})
+    omega_hospital: str = "Omega Hospital"
+
+    def __post_init__(self) -> None:
+        met_weight = Decimal(str(self.met_weight_per_pathologist))
+        wh_weight = Decimal(str(self.wh_starting_weight))
+        case_types = frozenset(
+            str(case_type).strip().upper()
+            for case_type in self.texas_case_types
+            if str(case_type).strip()
+        )
+        omega_hospital = self.omega_hospital.strip()
+
+        if met_weight < ZERO_WEIGHT:
+            raise ValueError(
+                "met_weight_per_pathologist cannot be negative."
+            )
+
+        if wh_weight < ZERO_WEIGHT:
+            raise ValueError("wh_starting_weight cannot be negative.")
+
+        if not case_types:
+            raise ValueError("texas_case_types cannot be empty.")
+
+        if not omega_hospital:
+            raise ValueError("omega_hospital cannot be blank.")
+
+        object.__setattr__(
+            self,
+            "met_weight_per_pathologist",
+            met_weight,
+        )
+        object.__setattr__(self, "wh_starting_weight", wh_weight)
+        object.__setattr__(self, "texas_case_types", case_types)
+        object.__setattr__(self, "omega_hospital", omega_hospital)
+
 
 @dataclass(frozen=True, slots=True)
 class AssignmentResult:
     """
     Record the final destination and reasoning for one accession.
 
-    Attributes:
-        accession: Accession that was assigned.
-        location: Final work location.
-        method: Mandatory routing or weighted balancing.
-        eligibility: Full eligibility evaluation for audit purposes.
-        assigned_weight_before: Location workload before assignment.
-        assigned_weight_after: Location workload after assignment.
-        target_weight: Calculated workload target for the location.
-        decision_notes: Explanation of the final selection.
+    A target of ``None`` means that the location is governed by a special
+    routing rule rather than an ordinary workload target.
     """
 
     accession: Accession
@@ -41,21 +89,13 @@ class AssignmentResult:
     eligibility: EligibilityResult
     assigned_weight_before: Decimal
     assigned_weight_after: Decimal
-    target_weight: Decimal
+    target_weight: Decimal | None
     decision_notes: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class UnassignedAccession:
-    """
-    Record an accession that could not be safely assigned.
-
-    Attributes:
-        accession: Accession that was not assigned.
-        error_code: Stable category suitable for reports and logs.
-        summary: Concise explanation.
-        details: Location-specific or exception-specific details.
-    """
+    """Record an accession that could not be safely assigned."""
 
     accession: Accession
     error_code: str
@@ -69,9 +109,10 @@ class LocationSortingSummary:
 
     location: LocationName
     number_of_pathologists: int
-    target_weight: Decimal
+    target_weight: Decimal | None
     accession_count: int
     assigned_weight: Decimal
+    starting_weight: Decimal = ZERO_WEIGHT
 
     @property
     def is_active(self) -> bool:
@@ -79,27 +120,38 @@ class LocationSortingSummary:
         return self.number_of_pathologists > 0
 
     @property
-    def weight_per_pathologist(self) -> Decimal | None:
-        """Return assigned weight per pathologist, when staffed."""
+    def effective_weight(self) -> Decimal:
+        """Return assigned weight plus any configured starting load."""
+        return self.starting_weight + self.assigned_weight
+
+    @property
+    def assigned_weight_per_pathologist(self) -> Decimal | None:
+        """Return newly assigned weight per pathologist, when staffed."""
         if self.number_of_pathologists == 0:
             return None
 
         return self.assigned_weight / self.number_of_pathologists
 
     @property
-    def variance_from_target(self) -> Decimal:
-        """Return assigned weight minus target weight."""
+    def weight_per_pathologist(self) -> Decimal | None:
+        """Return effective weight per pathologist, when staffed."""
+        if self.number_of_pathologists == 0:
+            return None
+
+        return self.effective_weight / self.number_of_pathologists
+
+    @property
+    def variance_from_target(self) -> Decimal | None:
+        """Return assigned weight minus target, when a target exists."""
+        if self.target_weight is None:
+            return None
+
         return self.assigned_weight - self.target_weight
 
 
 @dataclass(frozen=True, slots=True)
 class SortingRunResult:
-    """
-    Complete output from one sorting run.
-
-    This structured result will later support reports, Excel exports,
-    dashboards, audit logs, and daily email summaries.
-    """
+    """Complete output from one sorting run."""
 
     input_accession_count: int
     assignments: tuple[AssignmentResult, ...]
@@ -155,16 +207,35 @@ class _EvaluatedAccession:
 
 
 @dataclass(frozen=True, slots=True)
+class _ForcedAccession:
+    """Internal record for a special business-rule assignment."""
+
+    item: _EvaluatedAccession
+    location: LocationName
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class SortingEngine:
     """
-    Assign accessions using mandatory rules and weighted balancing.
+    Assign accessions according to special rules and weighted balancing.
 
-    Flexible cases are processed from highest weight to lowest. The engine
-    selects the eligible location with the largest remaining target deficit.
-    Preferred locations are used only to break equal-deficit ties.
+    Assignment order:
+
+    1. DP and DS cases go to TEXAS without a workload target.
+    2. When exactly one pathologist is at OMEGA, Omega Hospital cases go
+       to OMEGA. Otherwise OMEGA receives no work.
+    3. Ordinary mandatory routing rules are applied.
+    4. MET receives eligible work toward a fixed target equal to its
+       pathologist count multiplied by ``met_weight_per_pathologist``.
+    5. Remaining eligible work is balanced among OLOL, BRG, and WH.
+       WH begins with the configured ``wh_starting_weight``.
     """
 
     eligibility_service: EligibilityService
+    settings: AssignmentSettings = field(
+        default_factory=AssignmentSettings
+    )
 
     def run(
         self,
@@ -178,7 +249,17 @@ class SortingEngine:
             accession_list
         )
 
-        targets = self._calculate_location_targets(evaluated)
+        (
+            forced_cases,
+            mandatory_cases,
+            flexible_cases,
+            policy_unassigned,
+        ) = self._classify_accessions(evaluated)
+        unassigned.extend(policy_unassigned)
+
+        target_cases = [*mandatory_cases, *flexible_cases]
+        targets = self._calculate_location_targets(target_cases)
+
         assigned_weights = {
             location: ZERO_WEIGHT
             for location in LocationName
@@ -187,28 +268,23 @@ class SortingEngine:
             location: 0
             for location in LocationName
         }
-
         assignments: list[AssignmentResult] = []
 
-        mandatory_cases = sorted(
-            (
-                item
-                for item in evaluated
-                if item.eligibility.is_mandatory
-            ),
-            key=self._accession_sort_key,
-        )
+        for forced in sorted(
+            forced_cases,
+            key=lambda forced: self._accession_sort_key(forced.item),
+        ):
+            assignment = self._assign_forced(
+                forced=forced,
+                assigned_weights=assigned_weights,
+            )
+            assignments.append(assignment)
+            assigned_counts[assignment.location] += 1
 
-        flexible_cases = sorted(
-            (
-                item
-                for item in evaluated
-                if not item.eligibility.is_mandatory
-            ),
+        for item in sorted(
+            mandatory_cases,
             key=self._accession_sort_key,
-        )
-
-        for item in mandatory_cases:
+        ):
             assignment = self._assign_mandatory(
                 item=item,
                 targets=targets,
@@ -217,7 +293,10 @@ class SortingEngine:
             assignments.append(assignment)
             assigned_counts[assignment.location] += 1
 
-        for item in flexible_cases:
+        for item in sorted(
+            flexible_cases,
+            key=self._accession_sort_key,
+        ):
             assignment = self._assign_flexible(
                 item=item,
                 targets=targets,
@@ -266,9 +345,10 @@ class SortingEngine:
         list[_EvaluatedAccession],
         list[UnassignedAccession],
     ]:
-        """Evaluate eligibility and separate unassignable accessions."""
+        """Evaluate eligibility and separate routing failures."""
         evaluated: list[_EvaluatedAccession] = []
         unassigned: list[UnassignedAccession] = []
+        omega_rule_active = self._omega_pathologist_count() == 1
 
         for accession in accessions:
             try:
@@ -286,7 +366,12 @@ class SortingEngine:
                 )
                 continue
 
-            if not eligibility.is_assignable:
+            special_override = self._is_texas_case(accession) or (
+                omega_rule_active
+                and self._is_omega_hospital(accession)
+            )
+
+            if not eligibility.is_assignable and not special_override:
                 unassigned.append(
                     self._create_no_eligible_location_result(
                         accession=accession,
@@ -304,6 +389,117 @@ class SortingEngine:
 
         return evaluated, unassigned
 
+    def _classify_accessions(
+        self,
+        evaluated: list[_EvaluatedAccession],
+    ) -> tuple[
+        list[_ForcedAccession],
+        list[_EvaluatedAccession],
+        list[_EvaluatedAccession],
+        list[UnassignedAccession],
+    ]:
+        """Separate special, mandatory, flexible, and policy failures."""
+        forced: list[_ForcedAccession] = []
+        mandatory: list[_EvaluatedAccession] = []
+        flexible: list[_EvaluatedAccession] = []
+        unassigned: list[UnassignedAccession] = []
+
+        texas_count = self._pathologist_count(LocationName.TEXAS)
+        omega_count = self._omega_pathologist_count()
+        omega_rule_active = omega_count == 1
+
+        for item in evaluated:
+            accession = item.accession
+
+            if self._is_texas_case(accession):
+                if texas_count == 0:
+                    unassigned.append(
+                        self._create_policy_unassigned_result(
+                            item=item,
+                            error_code="TEXAS_NOT_STAFFED",
+                            summary=(
+                                f"Accession {accession.accession_number} "
+                                f"is a {accession.case_type} case and must "
+                                "go to TEXAS, but TEXAS has no staffed "
+                                "pathologists."
+                            ),
+                        )
+                    )
+                    continue
+
+                forced.append(
+                    _ForcedAccession(
+                        item=item,
+                        location=LocationName.TEXAS,
+                        reason=(
+                            f"Case type {accession.case_type} is routed "
+                            "to TEXAS without a workload target."
+                        ),
+                    )
+                )
+                continue
+
+            if omega_rule_active and self._is_omega_hospital(accession):
+                forced.append(
+                    _ForcedAccession(
+                        item=item,
+                        location=LocationName.OMEGA,
+                        reason=(
+                            "Exactly one pathologist is staffed at OMEGA, "
+                            "so Omega Hospital cases are routed to OMEGA."
+                        ),
+                    )
+                )
+                continue
+
+            if not item.eligibility.is_assignable:
+                unassigned.append(
+                    self._create_no_eligible_location_result(
+                        accession=accession,
+                        eligibility=item.eligibility,
+                    )
+                )
+                continue
+
+            if item.eligibility.is_mandatory:
+                required_location = item.eligibility.required_location
+
+                if required_location in SPECIAL_ONLY_LOCATIONS:
+                    unassigned.append(
+                        self._create_policy_unassigned_result(
+                            item=item,
+                            error_code="SPECIAL_LOCATION_RULE_CONFLICT",
+                            summary=(
+                                f"Accession {accession.accession_number} "
+                                f"was routed to {required_location.value}, "
+                                "but that destination is reserved for its "
+                                "special assignment rule."
+                            ),
+                        )
+                    )
+                    continue
+
+                mandatory.append(item)
+                continue
+
+            if not self._normal_eligible_locations(item):
+                unassigned.append(
+                    self._create_policy_unassigned_result(
+                        item=item,
+                        error_code="NO_POLICY_ELIGIBLE_LOCATION",
+                        summary=(
+                            f"Accession {accession.accession_number} has "
+                            "no eligible destination after TEXAS and OMEGA "
+                            "were removed from ordinary balancing."
+                        ),
+                    )
+                )
+                continue
+
+            flexible.append(item)
+
+        return forced, mandatory, flexible, unassigned
+
     def _create_no_eligible_location_result(
         self,
         accession: Accession,
@@ -318,9 +514,8 @@ class SortingEngine:
             if not reasons:
                 continue
 
-            joined_reasons = "; ".join(reasons)
             details.append(
-                f"{location.value}: {joined_reasons}"
+                f"{location.value}: {'; '.join(reasons)}"
             )
 
         return UnassignedAccession(
@@ -333,61 +528,85 @@ class SortingEngine:
             details=tuple(details),
         )
 
+    @staticmethod
+    def _create_policy_unassigned_result(
+        item: _EvaluatedAccession,
+        error_code: str,
+        summary: str,
+    ) -> UnassignedAccession:
+        """Create an unassigned record caused by a business policy."""
+        eligible = ", ".join(
+            location.value
+            for location in item.eligibility.eligible_locations
+        )
+        details = (
+            f"Eligibility service locations: {eligible or 'none'}.",
+        )
+
+        return UnassignedAccession(
+            accession=item.accession,
+            error_code=error_code,
+            summary=summary,
+            details=details,
+        )
+
     def _calculate_location_targets(
         self,
         evaluated: list[_EvaluatedAccession],
-    ) -> dict[LocationName, Decimal]:
-        """
-        Calculate target weight proportional to pathologist staffing.
-
-        Only locations eligible for at least one accession participate in
-        target allocation. This avoids assigning a theoretical workload target
-        to a location that cannot receive any of the day's work.
-        """
-        targets = {
-            location: ZERO_WEIGHT
+    ) -> dict[LocationName, Decimal | None]:
+        """Calculate MET and proportional OLOL/BRG/WH targets."""
+        targets: dict[LocationName, Decimal | None] = {
+            location: None
             for location in LocationName
         }
 
-        if not evaluated:
-            return targets
-
-        participating_locations: set[LocationName] = set()
-
-        for item in evaluated:
-            participating_locations.update(
-                item.eligibility.eligible_locations
-            )
-
-        total_pathologists = sum(
-            self.eligibility_service.staffing_context
-            .get_location_capability(location)
-            .number_of_pathologists
-            for location in participating_locations
+        met_count = self._pathologist_count(LocationName.MET)
+        met_target = (
+            Decimal(met_count)
+            * self.settings.met_weight_per_pathologist
         )
+        targets[LocationName.MET] = met_target
 
-        if total_pathologists == 0:
-            return targets
+        for location in BALANCED_LOCATIONS:
+            targets[location] = ZERO_WEIGHT
 
         total_weight = sum(
-            (
-                item.accession.weight
-                for item in evaluated
-            ),
+            (item.accession.weight for item in evaluated),
             start=ZERO_WEIGHT,
         )
+        proportional_weight = max(
+            total_weight - met_target,
+            ZERO_WEIGHT,
+        )
 
-        for location in participating_locations:
-            capability = (
-                self.eligibility_service.staffing_context
-                .get_location_capability(location)
+        pathologist_counts = {
+            location: self._pathologist_count(location)
+            for location in BALANCED_LOCATIONS
+        }
+        total_balanced_pathologists = sum(
+            pathologist_counts.values()
+        )
+
+        if total_balanced_pathologists == 0:
+            return targets
+
+        wh_starting_weight = self._wh_starting_weight()
+        effective_pool = proportional_weight + wh_starting_weight
+        weight_per_pathologist = (
+            effective_pool
+            / Decimal(total_balanced_pathologists)
+        )
+
+        for location in BALANCED_LOCATIONS:
+            target = (
+                Decimal(pathologist_counts[location])
+                * weight_per_pathologist
             )
 
-            targets[location] = (
-                total_weight
-                * capability.number_of_pathologists
-                / total_pathologists
-            )
+            if location == LocationName.WH:
+                target -= wh_starting_weight
+
+            targets[location] = max(target, ZERO_WEIGHT)
 
         return targets
 
@@ -398,13 +617,41 @@ class SortingEngine:
         """Sort heavier cases first, then accession number."""
         return (-item.accession.weight, item.accession.accession_number)
 
+    def _assign_forced(
+        self,
+        forced: _ForcedAccession,
+        assigned_weights: dict[LocationName, Decimal],
+    ) -> AssignmentResult:
+        """Assign an accession under a special destination rule."""
+        item = forced.item
+        before = assigned_weights[forced.location]
+        after = before + item.accession.weight
+        assigned_weights[forced.location] = after
+
+        return AssignmentResult(
+            accession=item.accession,
+            location=forced.location,
+            method=AssignmentMethod.MANDATORY,
+            eligibility=item.eligibility,
+            assigned_weight_before=before,
+            assigned_weight_after=after,
+            target_weight=None,
+            decision_notes=(
+                forced.reason,
+                (
+                    f"Location weight changed from {before} "
+                    f"to {after}."
+                ),
+            ),
+        )
+
     def _assign_mandatory(
         self,
         item: _EvaluatedAccession,
-        targets: Mapping[LocationName, Decimal],
+        targets: Mapping[LocationName, Decimal | None],
         assigned_weights: dict[LocationName, Decimal],
     ) -> AssignmentResult:
-        """Assign an accession with a mandatory destination."""
+        """Assign an accession with an ordinary mandatory destination."""
         required_location = item.eligibility.required_location
 
         if required_location is None:
@@ -412,9 +659,16 @@ class SortingEngine:
                 "Mandatory assignment called without a required location."
             )
 
+        if required_location in SPECIAL_ONLY_LOCATIONS:
+            raise RuntimeError(
+                "Special-only locations must be assigned before ordinary "
+                "mandatory routing."
+            )
+
         before = assigned_weights[required_location]
         after = before + item.accession.weight
         assigned_weights[required_location] = after
+        target = self._required_target(targets, required_location)
 
         return AssignmentResult(
             accession=item.accession,
@@ -423,15 +677,15 @@ class SortingEngine:
             eligibility=item.eligibility,
             assigned_weight_before=before,
             assigned_weight_after=after,
-            target_weight=targets[required_location],
+            target_weight=target,
             decision_notes=(
                 (
                     f"Mandatory routing required "
                     f"{required_location.value}."
                 ),
                 (
-                    f"Location weight changed from {before} "
-                    f"to {after}."
+                    f"Target weight was {target}; location weight "
+                    f"changed from {before} to {after}."
                 ),
             ),
         )
@@ -439,12 +693,20 @@ class SortingEngine:
     def _assign_flexible(
         self,
         item: _EvaluatedAccession,
-        targets: Mapping[LocationName, Decimal],
+        targets: Mapping[LocationName, Decimal | None],
         assigned_weights: dict[LocationName, Decimal],
     ) -> AssignmentResult:
-        """Select the best eligible location for a flexible accession."""
+        """Select the best ordinary location for a flexible accession."""
+        candidates = self._normal_eligible_locations(item)
+
+        if not candidates:
+            raise RuntimeError(
+                "Flexible assignment called without a policy-eligible "
+                "location."
+            )
+
         selected_location = min(
-            item.eligibility.eligible_locations,
+            candidates,
             key=lambda location: self._candidate_sort_key(
                 location=location,
                 eligibility=item.eligibility,
@@ -457,14 +719,13 @@ class SortingEngine:
         after = before + item.accession.weight
         assigned_weights[selected_location] = after
 
-        target = targets[selected_location]
+        target = self._required_target(targets, selected_location)
         deficit_before = target - before
 
         notes = [
             (
                 f"Selected {selected_location.value} from "
-                f"{len(item.eligibility.eligible_locations)} "
-                "eligible locations."
+                f"{len(candidates)} policy-eligible locations."
             ),
             (
                 f"Target weight was {target}; assigned weight before "
@@ -477,13 +738,23 @@ class SortingEngine:
             ),
         ]
 
+        if selected_location == LocationName.WH:
+            starting_weight = self._wh_starting_weight()
+            notes.append(
+                (
+                    f"WH began with configured weight {starting_weight}; "
+                    f"its effective weight after assignment was "
+                    f"{starting_weight + after}."
+                )
+            )
+
         if selected_location in item.eligibility.preferred_locations:
             notes.append(
-                
+                (
                     f"{selected_location.value} was also a preferred "
                     "location and preference was available as a "
                     "tie-breaker."
-                
+                )
             )
 
         return AssignmentResult(
@@ -497,20 +768,16 @@ class SortingEngine:
             decision_notes=tuple(notes),
         )
 
-    @staticmethod
     def _candidate_sort_key(
+        self,
         location: LocationName,
         eligibility: EligibilityResult,
-        targets: Mapping[LocationName, Decimal],
+        targets: Mapping[LocationName, Decimal | None],
         assigned_weights: Mapping[LocationName, Decimal],
     ) -> tuple[Decimal, bool, int, str]:
-        """
-        Rank an eligible location.
-
-        Lower tuple values win. Negating the deficit causes the location
-        furthest below its target to sort first.
-        """
-        deficit = targets[location] - assigned_weights[location]
+        """Rank an ordinary eligible location by target deficit."""
+        target = self._required_target(targets, location)
+        deficit = target - assigned_weights[location]
 
         try:
             preference_rank = (
@@ -530,32 +797,91 @@ class SortingEngine:
             location.value,
         )
 
+    def _normal_eligible_locations(
+        self,
+        item: _EvaluatedAccession,
+    ) -> tuple[LocationName, ...]:
+        """Return eligible destinations used by ordinary balancing."""
+        return tuple(
+            location
+            for location in item.eligibility.eligible_locations
+            if location not in SPECIAL_ONLY_LOCATIONS
+        )
+
+    @staticmethod
+    def _required_target(
+        targets: Mapping[LocationName, Decimal | None],
+        location: LocationName,
+    ) -> Decimal:
+        """Return a numeric target for a target-based location."""
+        target = targets[location]
+
+        if target is None:
+            raise RuntimeError(
+                f"{location.value} does not use a workload target."
+            )
+
+        return target
+
+    def _pathologist_count(self, location: LocationName) -> int:
+        """Return the number of pathologists staffed at a location."""
+        capability = (
+            self.eligibility_service.staffing_context
+            .get_location_capability(location)
+        )
+        return capability.number_of_pathologists
+
+    def _omega_pathologist_count(self) -> int:
+        """Return the number of pathologists staffed at OMEGA."""
+        return self._pathologist_count(LocationName.OMEGA)
+
+    def _wh_starting_weight(self) -> Decimal:
+        """Return WH starting weight only when WH is staffed."""
+        if self._pathologist_count(LocationName.WH) == 0:
+            return ZERO_WEIGHT
+
+        return self.settings.wh_starting_weight
+
+    def _is_texas_case(self, accession: Accession) -> bool:
+        """Return whether an accession belongs to a TEXAS case type."""
+        return (
+            accession.case_type.strip().upper()
+            in self.settings.texas_case_types
+        )
+
+    def _is_omega_hospital(self, accession: Accession) -> bool:
+        """Return whether an accession originated at Omega Hospital."""
+        return (
+            accession.hospital.strip().casefold()
+            == self.settings.omega_hospital.casefold()
+        )
+
     def _build_location_summaries(
         self,
-        targets: Mapping[LocationName, Decimal],
+        targets: Mapping[LocationName, Decimal | None],
         assigned_weights: Mapping[LocationName, Decimal],
         assigned_counts: Mapping[LocationName, int],
     ) -> dict[LocationName, LocationSortingSummary]:
-        """Build final statistics for all five locations."""
+        """Build final statistics for every configured location."""
         summaries: dict[
             LocationName,
             LocationSortingSummary,
         ] = {}
 
         for location in LocationName:
-            capability = (
-                self.eligibility_service.staffing_context
-                .get_location_capability(location)
+            starting_weight = (
+                self._wh_starting_weight()
+                if location == LocationName.WH
+                else ZERO_WEIGHT
             )
 
             summaries[location] = LocationSortingSummary(
                 location=location,
-                number_of_pathologists=(
-                    capability.number_of_pathologists
-                ),
+                number_of_pathologists=self._pathologist_count(location),
                 target_weight=targets[location],
                 accession_count=assigned_counts[location],
                 assigned_weight=assigned_weights[location],
+                starting_weight=starting_weight,
             )
 
         return summaries

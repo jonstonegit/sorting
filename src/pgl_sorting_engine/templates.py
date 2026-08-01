@@ -30,6 +30,16 @@ DAILY_FILENAME = "daily_sorting.xlsx"
 
 MAX_INPUT_ROW = 1000
 
+ASSIGNMENT_SETTINGS_HEADERS = (
+    "met_weight_per_pathologist",
+    "wh_starting_weight",
+)
+
+ASSIGNMENT_SETTINGS_DEFAULTS = (
+    200,
+    400,
+)
+
 LOCATIONS = (
     "OLOL",
     "BRG",
@@ -134,8 +144,10 @@ def create_configuration_template(
     case_types = workbook.create_sheet("CaseTypes")
     prefixes = workbook.create_sheet("Prefixes")
     hospitals = workbook.create_sheet("Hospitals")
+    assignment_settings = workbook.create_sheet("AssignmentSettings")
     lists = workbook.create_sheet("Lists")
 
+    _build_assignment_settings_sheet(assignment_settings)
     _build_configuration_instructions(instructions)
     _build_configuration_lists(lists)
 
@@ -200,13 +212,9 @@ def create_configuration_template(
         field_name="prefix",
     )
 
-    location_formula = (
-        f"{quote_sheetname('Lists')}!"
-        f"$A$2:$A${len(LOCATIONS) + 1}"
-    )
-    requirement_formula = (
-        f"{quote_sheetname('Lists')}!$B$2:$B$4"
-    )
+    location_formula = f'"{",".join(LOCATIONS)}"'
+
+    requirement_formula = f'"{",".join(REQUIREMENTS)}"'
 
     _add_list_validation(
         worksheet=case_types,
@@ -313,10 +321,7 @@ def create_daily_template(
         cell_range=f"E2:E{MAX_INPUT_ROW}",
     )
 
-    location_formula = (
-        f"{quote_sheetname('Lists')}!"
-        f"$A$2:$A${len(LOCATIONS) + 1}"
-    )
+    location_formula = f'"{",".join(LOCATIONS)}"'
 
     _add_list_validation(
         worksheet=staffing,
@@ -406,6 +411,19 @@ def _configure_input_sheet(
     )
 
     worksheet.add_table(table)
+
+def _build_assignment_settings_sheet(
+    worksheet: Any,
+) -> None:
+    """Build the editable assignment-settings worksheet."""
+
+    worksheet.append(list(ASSIGNMENT_SETTINGS_HEADERS))
+    worksheet.append(list(ASSIGNMENT_SETTINGS_DEFAULTS))
+
+    worksheet.freeze_panes = "A2"
+
+    worksheet.column_dimensions["A"].width = 32
+    worksheet.column_dimensions["B"].width = 24
 
     
 
