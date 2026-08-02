@@ -31,3 +31,6 @@ Thumbs.db
 # Temporary output
 output/
 logs/
+
+# Windows download metadata
+*:Zone.Identifier
