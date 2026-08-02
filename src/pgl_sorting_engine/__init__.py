@@ -45,11 +45,13 @@ from pgl_sorting_engine.models import (
     HospitalRoutingRule,
     Pathologist,
 )
+from pgl_sorting_engine.reporting import create_sorting_report
 from pgl_sorting_engine.rules import (
     CaseTypeRule,
     PrefixRoutingRule,
     RoutingRuleSet,
 )
+from pgl_sorting_engine.runner import run_sorting
 from pgl_sorting_engine.staffing import (
     DailySortingContext,
     LocationCapability,
@@ -102,4 +104,6 @@ __all__ = [
     "create_configuration_template",
     "create_daily_template",
     "create_sorting_templates",
+    "create_sorting_report",
+    "run_sorting",
     ]

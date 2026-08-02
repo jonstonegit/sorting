@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 pgl-create-templates = "pgl_sorting_engine.templates:main"
+pgl-sort = "pgl_sorting_engine.runner:main"
 
 [project.optional-dependencies]
 dev = [
