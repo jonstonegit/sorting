@@ -1,5 +1,6 @@
 """Tests for the two-workbook Excel input loader."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,16 @@ def create_configuration_workbook(path: Path) -> None:
             None,
         ]
     )
+    assignment_settings = workbook.create_sheet(
+        "AssignmentSettings"
+    )
+    assignment_settings.append(
+        [
+            "met_weight_per_pathologist",
+            "wh_starting_weight",
+        ]
+    )
+    assignment_settings.append([125, 375])
 
     workbook.save(path)
 
@@ -146,6 +157,15 @@ def test_valid_workbooks_build_and_run_engine(
 
     assert len(data.configuration.pathologists) == 1
     assert len(data.daily.accessions) == 1
+    assert data.configuration.assignment_settings.met_weight_per_pathologist == (
+        Decimal("125")
+    )
+    assert data.configuration.assignment_settings.wh_starting_weight == (
+        Decimal("375")
+    )
+    assert data.build_engine().settings == (
+        data.configuration.assignment_settings
+    )
     assert result.assigned_accession_count == 1
     assert result.assignments[0].location is LocationName.OLOL
 
@@ -176,6 +196,54 @@ def test_missing_configuration_sheet_is_identified(
     assert "CONFIGURATION / CaseTypes" in message
     assert "Required worksheet is missing" in message
 
+
+
+def test_missing_assignment_settings_sheet_is_identified(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_workbook(configuration_path)
+    create_daily_workbook(daily_path)
+
+    workbook = load_workbook(configuration_path)
+    workbook.remove(workbook["AssignmentSettings"])
+    workbook.save(configuration_path)
+
+    with pytest.raises(SpreadsheetValidationError) as exc_info:
+        load_sorting_workbooks(
+            configuration_path=configuration_path,
+            daily_path=daily_path,
+        )
+
+    message = str(exc_info.value)
+    assert "CONFIGURATION / AssignmentSettings" in message
+    assert "Required worksheet is missing" in message
+
+
+def test_invalid_assignment_setting_identifies_row(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_workbook(configuration_path)
+    create_daily_workbook(daily_path)
+
+    workbook = load_workbook(configuration_path)
+    workbook["AssignmentSettings"]["A2"] = "not-a-number"
+    workbook.save(configuration_path)
+
+    with pytest.raises(SpreadsheetValidationError) as exc_info:
+        load_sorting_workbooks(
+            configuration_path=configuration_path,
+            daily_path=daily_path,
+        )
+
+    message = str(exc_info.value)
+    assert "CONFIGURATION / AssignmentSettings row 2" in message
+    assert "not-a-number" in message
 
 def test_missing_daily_sheet_is_identified(
     tmp_path: Path,

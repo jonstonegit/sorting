@@ -5,17 +5,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
-from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 from openpyxl.utils.exceptions import InvalidFileException  # type: ignore[import-untyped]
-from openpyxl.worksheet.worksheet import Worksheet
 
-from pgl_sorting_engine.eligibility import EligibilityService
 from pgl_sorting_engine.assignment import (
     AssignmentSettings,
     SortingEngine,
 )
+from pgl_sorting_engine.eligibility import EligibilityService
 from pgl_sorting_engine.enums import (
     LocationName,
     SubspecialtyRequirement,
@@ -81,6 +79,10 @@ STAFFING_HEADERS = (
 )
 
 ASSIGNMENT_SETTINGS_SHEET = "AssignmentSettings"
+ASSIGNMENT_SETTINGS_HEADERS = (
+    "met_weight_per_pathologist",
+    "wh_starting_weight",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +137,8 @@ class SortingInputData:
             eligibility_service=EligibilityService(
                 rules=self.configuration.build_rule_set(),
                 staffing_context=self.build_staffing_context(),
-            )
+            ),
+            settings=self.configuration.assignment_settings,
         )
 
 
@@ -195,6 +198,10 @@ def load_sorting_workbooks(
             configuration_workbook,
             issues,
         )
+        assignment_settings = _load_assignment_settings(
+            configuration_workbook,
+            issues,
+        )
 
         accessions, accession_rows = _load_accessions(
             daily_workbook,
@@ -214,6 +221,7 @@ def load_sorting_workbooks(
         case_type_rules=tuple(case_type_rules),
         prefix_rules=tuple(prefix_rules),
         hospital_rules=tuple(hospital_rules),
+        assignment_settings=assignment_settings,
     )
 
     daily = DailySortingData(
@@ -249,117 +257,77 @@ def load_sorting_workbooks(
 
     return data
 
-def _load_assignment_settings(
-    worksheet: Worksheet,
-) -> AssignmentSettings:
-    """Load MET and WH assignment values from Excel."""
 
-    required_headers = (
-        "met_weight_per_pathologist",
-        "wh_starting_weight",
+def _load_assignment_settings(
+    workbook: Any,
+    issues: list[SpreadsheetIssue],
+) -> AssignmentSettings:
+    """Load editable MET and WH workload settings."""
+    rows = _sheet_rows(
+        workbook=workbook,
+        workbook_label=CONFIGURATION_WORKBOOK,
+        sheet_name=ASSIGNMENT_SETTINGS_SHEET,
+        required_headers=ASSIGNMENT_SETTINGS_HEADERS,
+        issues=issues,
     )
 
-    header_columns = {
-        str(cell.value).strip(): cell.column
-        for cell in worksheet[1]
-        if cell.value is not None
-    }
+    if not rows:
+        return AssignmentSettings()
 
-    missing_headers = [
-        header
-        for header in required_headers
-        if header not in header_columns
-    ]
-
-    if missing_headers:
-        missing_text = ", ".join(missing_headers)
-
-        raise ValueError(
-            f"{ASSIGNMENT_SETTINGS_SHEET} is missing "
-            f"required column(s): {missing_text}."
+    if len(rows) > 1:
+        issues.append(
+            SpreadsheetIssue(
+                workbook=CONFIGURATION_WORKBOOK,
+                sheet=ASSIGNMENT_SETTINGS_SHEET,
+                row_number=rows[1][0],
+                message=(
+                    "AssignmentSettings must contain only one "
+                    "settings row."
+                ),
+            )
         )
 
-    populated_rows = [
-        row_number
-        for row_number in range(
-            2,
-            worksheet.max_row + 1,
-        )
-        if any(
-            worksheet.cell(
-                row=row_number,
-                column=header_columns[header],
-            ).value
-            not in (None, "")
-            for header in required_headers
-        )
-    ]
-
-    if not populated_rows:
-        raise ValueError(
-            f"{ASSIGNMENT_SETTINGS_SHEET} must contain "
-            "one settings row."
-        )
-
-    if len(populated_rows) > 1:
-        raise ValueError(
-            f"{ASSIGNMENT_SETTINGS_SHEET} must contain "
-            "only one settings row."
-        )
-
-    row_number = populated_rows[0]
-
-    met_raw = worksheet.cell(
-        row=row_number,
-        column=header_columns[
-            "met_weight_per_pathologist"
-        ],
-    ).value
-
-    wh_raw = worksheet.cell(
-        row=row_number,
-        column=header_columns[
-            "wh_starting_weight"
-        ],
-    ).value
+    row_number, values = rows[0]
 
     try:
-        met_weight = Decimal(
-            str(met_raw).strip()
+        met_text = _required_text(
+            values["met_weight_per_pathologist"],
+            "MET weight per pathologist",
         )
-        wh_starting_weight = Decimal(
-            str(wh_raw).strip()
-        )
-    except InvalidOperation as exc:
-        raise ValueError(
-            "MET weight per pathologist and WH starting "
-            "weight must be valid numbers."
-        ) from exc
-
-    if not met_weight.is_finite():
-        raise ValueError(
-            "met_weight_per_pathologist must be finite."
+        wh_text = _required_text(
+            values["wh_starting_weight"],
+            "WH starting weight",
         )
 
-    if not wh_starting_weight.is_finite():
-        raise ValueError(
-            "wh_starting_weight must be finite."
-        )
+        try:
+            met_weight = Decimal(met_text)
+        except InvalidOperation as exc:
+            raise ValueError(
+                "MET weight per pathologist must be a valid "
+                f"number; received {met_text!r}."
+            ) from exc
 
-    if met_weight < 0:
-        raise ValueError(
-            "met_weight_per_pathologist cannot be negative."
-        )
+        try:
+            wh_starting_weight = Decimal(wh_text)
+        except InvalidOperation as exc:
+            raise ValueError(
+                "WH starting weight must be a valid number; "
+                f"received {wh_text!r}."
+            ) from exc
 
-    if wh_starting_weight < 0:
-        raise ValueError(
-            "wh_starting_weight cannot be negative."
+        return AssignmentSettings(
+            met_weight_per_pathologist=met_weight,
+            wh_starting_weight=wh_starting_weight,
         )
-
-    return AssignmentSettings(
-        met_weight_per_pathologist=met_weight,
-        wh_starting_weight=wh_starting_weight,
-    )
+    except ValueError as exc:
+        _append_row_issue(
+            issues=issues,
+            workbook=CONFIGURATION_WORKBOOK,
+            sheet=ASSIGNMENT_SETTINGS_SHEET,
+            row_number=row_number,
+            exc=exc,
+        )
+        return AssignmentSettings()
 
 
 def _open_workbook(

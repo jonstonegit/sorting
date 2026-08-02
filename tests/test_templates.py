@@ -1,5 +1,6 @@
 """Tests for generated Excel workbook templates."""
 
+from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -40,6 +41,7 @@ def test_configuration_template_has_expected_sheets(
         "CaseTypes",
         "Prefixes",
         "Hospitals",
+        "AssignmentSettings",
         "Lists",
     ]
     assert workbook["Lists"].sheet_state == "hidden"
@@ -64,6 +66,17 @@ def test_configuration_template_has_expected_sheets(
 
     assert workbook["Pathologists"].freeze_panes == "A2"
     assert workbook["CaseTypes"].freeze_panes == "A2"
+    assert [
+        cell.value
+        for cell in workbook["AssignmentSettings"][1]
+    ] == [
+        "met_weight_per_pathologist",
+        "wh_starting_weight",
+    ]
+    assert [
+        cell.value
+        for cell in workbook["AssignmentSettings"][2]
+    ] == [100, 400]
 
     workbook.close()
 
@@ -170,5 +183,13 @@ def test_blank_templates_are_accepted_by_loader(
     assert data.configuration.case_type_rules == ()
     assert data.configuration.prefix_rules == ()
     assert data.configuration.hospital_rules == ()
+    assert (
+        data.configuration.assignment_settings.met_weight_per_pathologist
+        == Decimal("100")
+    )
+    assert (
+        data.configuration.assignment_settings.wh_starting_weight
+        == Decimal("400")
+    )
     assert data.daily.accessions == ()
     assert data.daily.staffing == ()

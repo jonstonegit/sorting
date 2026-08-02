@@ -2,6 +2,7 @@
 
 from pgl_sorting_engine.assignment import (
     AssignmentResult,
+    AssignmentSettings,
     LocationSortingSummary,
     SortingEngine,
     SortingRunResult,
@@ -86,6 +87,7 @@ __all__ = [
     "UnknownPrefixError",
     "AssignmentMethod",
     "AssignmentResult",
+    "AssignmentSettings",
     "DuplicateAccessionError",
     "LocationSortingSummary",
     "SortingEngine",

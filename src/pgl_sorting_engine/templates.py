@@ -15,7 +15,6 @@ from openpyxl.styles import (  # type: ignore[import-untyped]
 )
 from openpyxl.utils import (  # type: ignore[import-untyped]
     get_column_letter,
-    quote_sheetname,
 )
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
     DataValidation,
@@ -36,7 +35,7 @@ ASSIGNMENT_SETTINGS_HEADERS = (
 )
 
 ASSIGNMENT_SETTINGS_DEFAULTS = (
-    200,
+    100,
     400,
 )
 
@@ -131,6 +130,7 @@ def create_configuration_template(
     * CaseTypes
     * Prefixes
     * Hospitals
+    * AssignmentSettings
     """
     path = Path(output_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,8 +425,6 @@ def _build_assignment_settings_sheet(
     worksheet.column_dimensions["A"].width = 32
     worksheet.column_dimensions["B"].width = 24
 
-    
-
 
 def _add_list_validation(
     worksheet: Any,
@@ -638,6 +636,11 @@ def _build_configuration_instructions(
             "Hospitals",
             "Defines which work locations may receive cases from each "
             "originating hospital.",
+        ),
+        (
+            "AssignmentSettings",
+            "Sets MET weight per pathologist and WH starting weight. "
+            "TEXAS and OMEGA rules are fixed in the application.",
         ),
         (
             "Important",

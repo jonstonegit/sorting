@@ -29,26 +29,28 @@ SPECIAL_ONLY_LOCATIONS = frozenset(
         LocationName.OMEGA,
     }
 )
+TEXAS_CASE_TYPES = frozenset({"DP", "DS"})
+OMEGA_HOSPITAL = "Omega Hospital"
 
 
 @dataclass(frozen=True, slots=True)
 class AssignmentSettings:
-    """Editable business parameters used by the assignment algorithm."""
+    """Editable MET and WH workload parameters."""
 
-    met_weight_per_pathologist: Decimal = Decimal("200")
+    met_weight_per_pathologist: Decimal = Decimal("100")
     wh_starting_weight: Decimal = Decimal("400")
-    texas_case_types: frozenset[str] = frozenset({"DP", "DS"})
-    omega_hospital: str = "Omega Hospital"
 
     def __post_init__(self) -> None:
         met_weight = Decimal(str(self.met_weight_per_pathologist))
         wh_weight = Decimal(str(self.wh_starting_weight))
-        case_types = frozenset(
-            str(case_type).strip().upper()
-            for case_type in self.texas_case_types
-            if str(case_type).strip()
-        )
-        omega_hospital = self.omega_hospital.strip()
+
+        if not met_weight.is_finite():
+            raise ValueError(
+                "met_weight_per_pathologist must be finite."
+            )
+
+        if not wh_weight.is_finite():
+            raise ValueError("wh_starting_weight must be finite.")
 
         if met_weight < ZERO_WEIGHT:
             raise ValueError(
@@ -58,20 +60,12 @@ class AssignmentSettings:
         if wh_weight < ZERO_WEIGHT:
             raise ValueError("wh_starting_weight cannot be negative.")
 
-        if not case_types:
-            raise ValueError("texas_case_types cannot be empty.")
-
-        if not omega_hospital:
-            raise ValueError("omega_hospital cannot be blank.")
-
         object.__setattr__(
             self,
             "met_weight_per_pathologist",
             met_weight,
         )
         object.__setattr__(self, "wh_starting_weight", wh_weight)
-        object.__setattr__(self, "texas_case_types", case_types)
-        object.__setattr__(self, "omega_hospital", omega_hospital)
 
 
 @dataclass(frozen=True, slots=True)
@@ -741,20 +735,20 @@ class SortingEngine:
         if selected_location == LocationName.WH:
             starting_weight = self._wh_starting_weight()
             notes.append(
-                (
+                
                     f"WH began with configured weight {starting_weight}; "
                     f"its effective weight after assignment was "
                     f"{starting_weight + after}."
-                )
+                
             )
 
         if selected_location in item.eligibility.preferred_locations:
             notes.append(
-                (
+                
                     f"{selected_location.value} was also a preferred "
                     "location and preference was available as a "
                     "tie-breaker."
-                )
+                
             )
 
         return AssignmentResult(
@@ -844,16 +838,13 @@ class SortingEngine:
 
     def _is_texas_case(self, accession: Accession) -> bool:
         """Return whether an accession belongs to a TEXAS case type."""
-        return (
-            accession.case_type.strip().upper()
-            in self.settings.texas_case_types
-        )
+        return accession.case_type.strip().upper() in TEXAS_CASE_TYPES
 
     def _is_omega_hospital(self, accession: Accession) -> bool:
         """Return whether an accession originated at Omega Hospital."""
         return (
             accession.hospital.strip().casefold()
-            == self.settings.omega_hospital.casefold()
+            == OMEGA_HOSPITAL.casefold()
         )
 
     def _build_location_summaries(
