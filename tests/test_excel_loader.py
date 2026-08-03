@@ -407,18 +407,20 @@ def test_optional_routing_overrides_are_loaded(
             "destination_location",
             "preferred_locations",
             "required_subspecialty",
+            "weight_cap",
         ]
     )
     overrides.append(
         [
-            "Track AB-GI",
+            "AB-GI to OLOL up to 40",
             None,
             "AB",
             "GI",
-            "identify_only",
+            "preferred_until_weight_cap",
+            "OLOL",
             None,
             None,
-            None,
+            40,
         ]
     )
     workbook.save(configuration_path)
@@ -429,4 +431,6 @@ def test_optional_routing_overrides_are_loaded(
     )
 
     assert len(data.configuration.override_rules) == 1
-    assert data.configuration.override_rules[0].rule_name == "Track AB-GI"
+    rule = data.configuration.override_rules[0]
+    assert rule.rule_name == "AB-GI to OLOL up to 40"
+    assert rule.weight_cap == Decimal("40")

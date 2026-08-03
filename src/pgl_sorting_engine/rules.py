@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 
 from pgl_sorting_engine.enums import (
@@ -167,6 +168,7 @@ class RoutingOverrideRule:
     destination_location: LocationName | None = None
     preferred_locations: tuple[LocationName, ...] = ()
     required_subspecialty: str | None = None
+    weight_cap: Decimal | None = None
 
     def __post_init__(self) -> None:
         name = str(self.rule_name).strip()
@@ -206,6 +208,28 @@ class RoutingOverrideRule:
             )
         )
 
+        weight_cap: Decimal | None
+        if self.weight_cap is None or not str(self.weight_cap).strip():
+            weight_cap = None
+        else:
+            try:
+                weight_cap = Decimal(str(self.weight_cap).strip())
+            except (InvalidOperation, ValueError) as exc:
+                raise ConfigurationError(
+                    f"Routing override {name!r} weight_cap must be numeric."
+                ) from exc
+
+            if not weight_cap.is_finite():
+                raise ConfigurationError(
+                    f"Routing override {name!r} weight_cap must be finite."
+                )
+
+            if weight_cap <= 0:
+                raise ConfigurationError(
+                    f"Routing override {name!r} weight_cap must be greater "
+                    "than zero."
+                )
+
         if len(preferred) != len(set(preferred)):
             raise ConfigurationError(
                 f"Routing override {name!r} contains duplicate preferred "
@@ -233,6 +257,7 @@ class RoutingOverrideRule:
             RoutingOverrideMode.ALWAYS_REQUIRED,
             RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT,
             RoutingOverrideMode.PREFERRED_UNTIL_TARGET,
+            RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP,
         }
 
         if mode in destination_modes and destination is None:
@@ -258,6 +283,18 @@ class RoutingOverrideRule:
                 f"blank for mode {mode.value}."
             )
 
+        if mode is RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP:
+            if weight_cap is None:
+                raise ConfigurationError(
+                    f"Routing override {name!r} requires a weight_cap for "
+                    "preferred_until_weight_cap."
+                )
+        elif weight_cap is not None:
+            raise ConfigurationError(
+                f"Routing override {name!r} may specify weight_cap only for "
+                "preferred_until_weight_cap."
+            )
+
         if (
             mode is not RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT
             and subspecialty is not None
@@ -276,6 +313,7 @@ class RoutingOverrideRule:
         object.__setattr__(self, "destination_location", destination)
         object.__setattr__(self, "preferred_locations", preferred)
         object.__setattr__(self, "required_subspecialty", subspecialty)
+        object.__setattr__(self, "weight_cap", weight_cap)
 
     @property
     def match_key(self) -> tuple[str | None, str, str]:

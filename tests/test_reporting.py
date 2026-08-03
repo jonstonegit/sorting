@@ -145,13 +145,61 @@ def test_distribution_grids_sum_weight_and_do_not_freeze(
     workbook = load_workbook(output_path, data_only=True)
     worksheet = workbook["Distribution Grids"]
 
-    title_cell = next(
+    total_title_cell = next(
+        cell
+        for row in worksheet.iter_rows()
+        for cell in row
+        if cell.value == "TOTAL: Weight by Case Type and Prefix"
+    )
+    olol_title_cell = next(
         cell
         for row in worksheet.iter_rows()
         for cell in row
         if cell.value == "OLOL: Weight by Case Type and Prefix"
     )
-    header_row = title_cell.row + 1
+
+    assert total_title_cell.row < olol_title_cell.row
+
+    total_header_row = total_title_cell.row + 1
+    total_headers = {
+        worksheet.cell(
+            row=total_header_row,
+            column=column,
+        ).value: column
+        for column in range(1, worksheet.max_column + 1)
+    }
+    total_gi_row = next(
+        row
+        for row in range(
+            total_header_row + 1,
+            worksheet.max_row + 1,
+        )
+        if worksheet.cell(row=row, column=1).value == "GI"
+    )
+
+    assert (
+        worksheet.cell(
+            row=total_gi_row,
+            column=total_headers["AB"],
+        ).value
+        == 2.5
+    )
+    assert (
+        worksheet.cell(
+            row=total_gi_row,
+            column=total_headers["PG"],
+        ).value
+        == 2.25
+    )
+    assert (
+        worksheet.cell(
+            row=total_gi_row,
+            column=total_headers["Total"],
+        ).value
+        == 4.75
+    )
+
+    header_row = olol_title_cell.row + 1
     headers = {
         worksheet.cell(row=header_row, column=column).value: column
         for column in range(1, worksheet.max_column + 1)
@@ -262,3 +310,101 @@ def test_report_writes_routing_override_match_sheet(tmp_path: Path) -> None:
     assert worksheet["F2"].value == "Lane PG-GI to MET"
     assert worksheet["I2"].value == "Yes"
     assert worksheet["M2"].value == "MET"
+
+
+def test_report_writes_weight_cap_audit_values(tmp_path: Path) -> None:
+    accession = Accession(
+        accession_number="S26-CAP",
+        prefix="PG",
+        case_type="GI",
+        hospital="Lane",
+        weight=Decimal("15"),
+    )
+    rule = RoutingOverrideRule(
+        rule_name="PG-GI to MET up to 40",
+        prefix="PG",
+        case_type="GI",
+        mode=RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP,
+        destination_location=LocationName.MET,
+        weight_cap=Decimal("40"),
+    )
+    eligibility = EligibilityResult(
+        accession=accession,
+        eligible_locations=frozenset({LocationName.MET, LocationName.OLOL}),
+        preferred_locations=(),
+        required_location=None,
+        subspecialty=None,
+        subspecialty_requirement=SubspecialtyRequirement.NOT_REQUIRED,
+        exclusion_reasons=MappingProxyType({}),
+        decision_notes=("Matched capped override.",),
+        override_rule=rule,
+        override_activated=True,
+        preferred_until_weight_cap_location=LocationName.MET,
+        override_notes=("Strict cap applied.",),
+    )
+    assignment = AssignmentResult(
+        accession=accession,
+        location=LocationName.MET,
+        method=AssignmentMethod.WEIGHT_BALANCED,
+        eligibility=eligibility,
+        assigned_weight_before=Decimal("10"),
+        assigned_weight_after=Decimal("25"),
+        target_weight=Decimal("100"),
+        decision_notes=("Capped preference selected MET.",),
+        override_applied=True,
+        override_application_notes=("Override applied.",),
+        override_matching_weight_before=Decimal("25"),
+        override_matching_weight_after=Decimal("40"),
+        override_weight_cap=Decimal("40"),
+    )
+    summaries = {
+        location: LocationSortingSummary(
+            location=location,
+            number_of_pathologists=1,
+            target_weight=(
+                None
+                if location in {LocationName.TEXAS, LocationName.OMEGA}
+                else Decimal("100")
+            ),
+            accession_count=(1 if location is LocationName.MET else 0),
+            assigned_weight=(
+                Decimal("15")
+                if location is LocationName.MET
+                else Decimal("0")
+            ),
+        )
+        for location in LocationName
+    }
+    result = SortingRunResult(
+        input_accession_count=1,
+        assignments=(assignment,),
+        unassigned_accessions=(),
+        location_summaries=MappingProxyType(summaries),
+    )
+    output_path = tmp_path / "cap_report.xlsx"
+    create_sorting_report(result, output_path)
+
+    workbook = load_workbook(output_path, data_only=True)
+    assignments = workbook["Assignments"]
+    assignment_headers = {
+        cell.value: cell.column for cell in assignments[1]
+    }
+    assert assignments.cell(
+        row=2,
+        column=assignment_headers["override_weight_cap"],
+    ).value == 40
+    assert assignments.cell(
+        row=2,
+        column=assignment_headers["override_matching_weight_before"],
+    ).value == 25
+    assert assignments.cell(
+        row=2,
+        column=assignment_headers["override_matching_weight_after"],
+    ).value == 40
+
+    matches = workbook["Routing Override Matches"]
+    match_headers = {cell.value: cell.column for cell in matches[1]}
+    assert matches.cell(
+        row=2,
+        column=match_headers["weight_cap"],
+    ).value == 40

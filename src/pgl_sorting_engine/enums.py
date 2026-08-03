@@ -39,3 +39,4 @@ class RoutingOverrideMode(StrEnum):
     )
     PREFERRED = "preferred"
     PREFERRED_UNTIL_TARGET = "preferred_until_target"
+    PREFERRED_UNTIL_WEIGHT_CAP = "preferred_until_weight_cap"

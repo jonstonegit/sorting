@@ -29,6 +29,8 @@ GRID_LOCATIONS = (
     LocationName.BRG,
     LocationName.WH,
     LocationName.MET,
+    LocationName.TEXAS,
+    LocationName.OMEGA,
 )
 
 ZERO_WEIGHT = Decimal("0")
@@ -73,6 +75,9 @@ ASSIGNMENT_HEADERS = (
     "override_destination",
     "override_notes",
     "decision_notes",
+    "override_weight_cap",
+    "override_matching_weight_before",
+    "override_matching_weight_after",
 )
 
 UNASSIGNED_HEADERS = (
@@ -108,6 +113,9 @@ AUDIT_HEADERS = (
     "eligibility_notes",
     "assignment_notes",
     "exclusion_reasons",
+    "override_weight_cap",
+    "override_matching_weight_before",
+    "override_matching_weight_after",
 )
 
 
@@ -127,6 +135,9 @@ OVERRIDE_MATCH_HEADERS = (
     "assigned_location",
     "assignment_method",
     "override_notes",
+    "weight_cap",
+    "matching_weight_before",
+    "matching_weight_after",
 )
 
 
@@ -254,16 +265,27 @@ def _write_assignments_sheet(
                 _override_destination(assignment),
                 _override_notes(assignment),
                 " | ".join(assignment.decision_notes),
+                _optional_number(assignment.override_weight_cap),
+                _optional_number(
+                    assignment.override_matching_weight_before
+                ),
+                _optional_number(
+                    assignment.override_matching_weight_after
+                ),
             ]
         )
-        _apply_number_formats(worksheet, row_number, columns=(5, 8))
+        _apply_number_formats(
+            worksheet,
+            row_number,
+            columns=(5, 8, 15, 16, 17),
+        )
 
     _configure_data_sheet(
         worksheet,
         headers=ASSIGNMENT_HEADERS,
         widths=(
             20, 10, 12, 36, 12, 20, 20, 16,
-            32, 38, 18, 22, 80, 80,
+            32, 38, 18, 22, 80, 80, 18, 28, 28,
         ),
     )
 
@@ -344,9 +366,20 @@ def _write_audit_sheet(
                 " | ".join(eligibility.decision_notes),
                 " | ".join(assignment.decision_notes),
                 exclusion_reasons,
+                _optional_number(assignment.override_weight_cap),
+                _optional_number(
+                    assignment.override_matching_weight_before
+                ),
+                _optional_number(
+                    assignment.override_matching_weight_after
+                ),
             ]
         )
-        _apply_number_formats(worksheet, row_number, columns=(9, 10, 11))
+        _apply_number_formats(
+            worksheet,
+            row_number,
+            columns=(9, 10, 11, 22, 23, 24),
+        )
 
     _configure_data_sheet(
         worksheet,
@@ -354,6 +387,7 @@ def _write_audit_sheet(
         widths=(
             20, 20, 20, 35, 35, 20, 20, 26, 24, 23, 16,
             32, 38, 18, 20, 18, 22, 90, 90, 90, 100,
+            18, 28, 28,
         ),
     )
 
@@ -399,16 +433,27 @@ def _write_override_matches_sheet(
                 assignment.location.value,
                 assignment.method.value,
                 _override_notes(assignment),
+                _optional_number(rule.weight_cap),
+                _optional_number(
+                    assignment.override_matching_weight_before
+                ),
+                _optional_number(
+                    assignment.override_matching_weight_after
+                ),
             ]
         )
-        _apply_number_formats(worksheet, row_number, columns=(5,))
+        _apply_number_formats(
+            worksheet,
+            row_number,
+            columns=(5, 16, 17, 18),
+        )
 
     _configure_data_sheet(
         worksheet,
         headers=OVERRIDE_MATCH_HEADERS,
         widths=(
             20, 10, 12, 36, 12, 32, 38, 20, 18, 22,
-            34, 28, 20, 20, 90,
+            34, 28, 20, 20, 90, 16, 28, 28,
         ),
     )
 
@@ -440,7 +485,7 @@ def _write_distribution_grids(
     worksheet: Worksheet,
     assignments: Sequence[AssignmentResult],
 ) -> None:
-    """Write prefix-by-case-type weight grids for core locations."""
+    """Write total and location-specific weight grids."""
     relevant_assignments = tuple(
         assignment
         for assignment in assignments
@@ -471,6 +516,15 @@ def _write_distribution_grids(
 
     start_row = 4
 
+    start_row = _write_location_grid(
+        worksheet=worksheet,
+        assignments=relevant_assignments,
+        location=None,
+        prefixes=prefixes,
+        case_types=case_types,
+        start_row=start_row,
+    )
+
     for location in GRID_LOCATIONS:
         start_row = _write_location_grid(
             worksheet=worksheet,
@@ -493,16 +547,18 @@ def _write_distribution_grids(
 def _write_location_grid(
     worksheet: Worksheet,
     assignments: Sequence[AssignmentResult],
-    location: LocationName,
+    location: LocationName | None,
     prefixes: Sequence[str],
     case_types: Sequence[str],
     start_row: int,
 ) -> int:
-    """Write one location's weight matrix and return the next start row."""
+    """Write a total or location weight matrix and return the next row."""
     last_column = len(prefixes) + 2
 
     title = (
-        f"{location.value}: Weight by Case Type and Prefix"
+        "TOTAL: Weight by Case Type and Prefix"
+        if location is None
+        else f"{location.value}: Weight by Case Type and Prefix"
     )
 
     worksheet.cell(
@@ -543,7 +599,10 @@ def _write_location_grid(
     ] = defaultdict(lambda: ZERO_WEIGHT)
 
     for assignment in assignments:
-        if assignment.location is not location:
+        if (
+            location is not None
+            and assignment.location is not location
+        ):
             continue
 
         key = (

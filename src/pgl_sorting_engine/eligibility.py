@@ -35,6 +35,7 @@ class EligibilityResult:
     override_rule: RoutingOverrideRule | None = None
     override_activated: bool = False
     preferred_until_target_location: LocationName | None = None
+    preferred_until_weight_cap_location: LocationName | None = None
     override_notes: tuple[str, ...] = ()
 
     @property
@@ -68,6 +69,7 @@ class _OverrideEvaluation:
     required_location: LocationName | None = None
     preferred_locations: tuple[LocationName, ...] = ()
     preferred_until_target_location: LocationName | None = None
+    preferred_until_weight_cap_location: LocationName | None = None
     activated: bool = False
     notes: tuple[str, ...] = ()
 
@@ -124,6 +126,7 @@ class EligibilityService:
             if location in eligible_locations
         )
         soft_target = override.preferred_until_target_location
+        soft_weight_cap = override.preferred_until_weight_cap_location
         override_notes = list(override.notes)
         override_activated = override.activated
 
@@ -133,6 +136,17 @@ class EligibilityService:
                 "the accession will use routine distribution."
             )
             soft_target = None
+            override_activated = False
+
+        if (
+            soft_weight_cap is not None
+            and soft_weight_cap not in eligible_locations
+        ):
+            override_notes.append(
+                f"Configured destination {soft_weight_cap.value} was not "
+                "eligible; the accession will use routine distribution."
+            )
+            soft_weight_cap = None
             override_activated = False
 
         if (
@@ -176,6 +190,7 @@ class EligibilityService:
             override_rule=override.rule,
             override_activated=override_activated,
             preferred_until_target_location=soft_target,
+            preferred_until_weight_cap_location=soft_weight_cap,
             override_notes=tuple(override_notes),
         )
 
@@ -282,6 +297,25 @@ class EligibilityService:
                     f"{destination.value} will receive the case while its "
                     "pre-assignment workload is below target; the final case "
                     "may cross the target.",
+                ),
+            )
+
+        if rule.mode is RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP:
+            destination = rule.destination_location
+            weight_cap = rule.weight_cap
+            if destination is None or weight_cap is None:
+                raise RuntimeError(
+                    "Validated until-weight-cap routing rule is incomplete."
+                )
+            return _OverrideEvaluation(
+                rule=rule,
+                preferred_until_weight_cap_location=destination,
+                activated=True,
+                notes=(
+                    matched,
+                    f"{destination.value} will receive matching cases while "
+                    f"their cumulative assigned weight remains at or below "
+                    f"the configured cap of {weight_cap}.",
                 ),
             )
 

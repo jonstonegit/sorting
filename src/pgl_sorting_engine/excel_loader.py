@@ -96,6 +96,7 @@ ROUTING_OVERRIDE_HEADERS = (
     "destination_location",
     "preferred_locations",
     "required_subspecialty",
+    "weight_cap",
 )
 
 
@@ -962,6 +963,14 @@ def _load_routing_override_rules(
                 ),
                 required_subspecialty=_optional_text(
                     values["required_subspecialty"]
+                ),
+                weight_cap=(
+                    None
+                    if _is_blank(values["weight_cap"])
+                    else _parse_positive_decimal(
+                        values["weight_cap"],
+                        "Weight cap",
+                    )
                 ),
             )
 

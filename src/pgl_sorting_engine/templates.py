@@ -35,7 +35,7 @@ ASSIGNMENT_SETTINGS_HEADERS = (
 )
 
 ASSIGNMENT_SETTINGS_DEFAULTS = (
-    100,
+    200,
     400,
 )
 
@@ -60,6 +60,7 @@ ROUTING_MODES = (
     "required_if_subspecialist_present",
     "preferred",
     "preferred_until_target",
+    "preferred_until_weight_cap",
 )
 
 HEADER_FILL = PatternFill(
@@ -221,8 +222,9 @@ def create_configuration_template(
             "destination_location",
             "preferred_locations",
             "required_subspecialty",
+            "weight_cap",
         ),
-        widths=(32, 32, 12, 14, 38, 24, 34, 28),
+        widths=(32, 32, 12, 14, 38, 24, 34, 28, 16),
         table_name="RoutingOverridesTable",
         tab_color="8064A2",
     )
@@ -292,8 +294,17 @@ def create_configuration_template(
         worksheet=routing_overrides,
         cell_range=f"F2:F{MAX_INPUT_ROW}",
         formula=location_formula,
-        prompt="Select the destination used by required or until-target rules.",
+        prompt=(
+            "Select the destination used by required, until-target, or "
+            "until-weight-cap rules."
+        ),
         error="Select a valid location.",
+    )
+
+    _add_positive_decimal_validation(
+        worksheet=routing_overrides,
+        cell_range=f"I2:I{MAX_INPUT_ROW}",
+        field_name="Weight cap",
     )
 
     _add_configuration_comments(
@@ -376,6 +387,7 @@ def create_daily_template(
     _add_positive_decimal_validation(
         worksheet=accessions,
         cell_range=f"E2:E{MAX_INPUT_ROW}",
+        field_name="Accession weight",
     )
 
     location_formula = f'"{",".join(LOCATIONS)}"'
@@ -540,8 +552,9 @@ def _add_two_letter_validation(
 def _add_positive_decimal_validation(
     worksheet: Any,
     cell_range: str,
+    field_name: str = "Weight",
 ) -> None:
-    """Require a positive numeric workload weight."""
+    """Require a positive numeric value."""
     validation = DataValidation(
         type="decimal",
         operator="greaterThan",
@@ -551,10 +564,14 @@ def _add_positive_decimal_validation(
         showErrorMessage=True,
         errorStyle="stop",
     )
-    validation.promptTitle = "Accession weight"
-    validation.prompt = "Enter a numeric weight greater than zero."
-    validation.errorTitle = "Invalid weight"
-    validation.error = "Weight must be a number greater than zero."
+    validation.promptTitle = field_name
+    validation.prompt = (
+        f"Enter a numeric {field_name.lower()} greater than zero."
+    )
+    validation.errorTitle = f"Invalid {field_name.lower()}"
+    validation.error = (
+        f"{field_name} must be a number greater than zero."
+    )
 
     worksheet.add_data_validation(validation)
     validation.add(cell_range)
@@ -671,13 +688,13 @@ def _add_configuration_comments(
     )
     routing_overrides["E1"].comment = Comment(
         "Modes: identify_only, always_required, "
-        "required_if_subspecialist_present, preferred, or "
-        "preferred_until_target.",
+        "required_if_subspecialist_present, preferred, "
+        "preferred_until_target, or preferred_until_weight_cap.",
         "PGL Sorting Engine",
     )
     routing_overrides["F1"].comment = Comment(
         "Required for always_required, required_if_subspecialist_present, "
-        "and preferred_until_target.",
+        "preferred_until_target, and preferred_until_weight_cap.",
         "PGL Sorting Engine",
     )
     routing_overrides["G1"].comment = Comment(
@@ -688,6 +705,12 @@ def _add_configuration_comments(
     routing_overrides["H1"].comment = Comment(
         "Optional for required_if_subspecialist_present. When blank, the "
         "CaseTypes subspecialty is used.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["I1"].comment = Comment(
+        "Required only for preferred_until_weight_cap. Matching cases are "
+        "preferred to the destination only when the new cumulative matching "
+        "weight will remain at or below this cap.",
         "PGL Sorting Engine",
     )
 

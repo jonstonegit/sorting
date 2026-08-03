@@ -204,3 +204,70 @@ def test_preferred_until_target_allows_one_case_overshoot_then_stops() -> None:
     assert locations["S2"] is LocationName.MET
     assert locations["S3"] is LocationName.OLOL
     assert result.summary_for(LocationName.MET).assigned_weight == Decimal("13")
+
+
+def test_preferred_until_weight_cap_is_strict_and_then_falls_back() -> None:
+    rule = RoutingOverrideRule(
+        rule_name="PG-GI to MET up to 40",
+        prefix="PG",
+        case_type="GI",
+        mode=RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP,
+        destination_location=LocationName.MET,
+        weight_cap=Decimal("40"),
+    )
+    service = _service((rule,))
+    engine = SortingEngine(
+        eligibility_service=service,
+        settings=AssignmentSettings(
+            met_weight_per_pathologist=Decimal("100"),
+            wh_starting_weight=Decimal("0"),
+        ),
+    )
+
+    result = engine.run(
+        (
+            _accession("S1", "25"),
+            _accession("S2", "16"),
+            _accession("S3", "15"),
+            _accession("S4", "1"),
+        )
+    )
+
+    assignments = {
+        assignment.accession.accession_number: assignment
+        for assignment in result.assignments
+    }
+
+    assert assignments["S1"].location is LocationName.MET
+    assert assignments["S1"].override_matching_weight_before == Decimal("0")
+    assert assignments["S1"].override_matching_weight_after == Decimal("25")
+    assert assignments["S1"].override_weight_cap == Decimal("40")
+
+    assert assignments["S2"].location is LocationName.OLOL
+    assert assignments["S2"].override_applied is False
+    assert assignments["S2"].override_matching_weight_before == Decimal("25")
+    assert assignments["S2"].override_matching_weight_after is None
+
+    assert assignments["S3"].location is LocationName.MET
+    assert assignments["S3"].override_matching_weight_before == Decimal("25")
+    assert assignments["S3"].override_matching_weight_after == Decimal("40")
+
+    assert assignments["S4"].location is LocationName.OLOL
+    assert result.summary_for(LocationName.MET).assigned_weight == Decimal("40")
+
+
+def test_weight_cap_mode_is_exposed_by_eligibility() -> None:
+    rule = RoutingOverrideRule(
+        rule_name="PG-GI capped MET preference",
+        prefix="PG",
+        case_type="GI",
+        mode=RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP,
+        destination_location=LocationName.MET,
+        weight_cap=Decimal("40"),
+    )
+
+    result = _service((rule,)).evaluate(_accession("S1"))
+
+    assert result.preferred_until_weight_cap_location is LocationName.MET
+    assert result.override_activated is True
+    assert result.override_rule is rule

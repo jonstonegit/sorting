@@ -77,7 +77,7 @@ def test_configuration_template_has_expected_sheets(
     assert [
         cell.value
         for cell in workbook["AssignmentSettings"][2]
-    ] == [100, 400]
+    ] == [200, 400]
 
     workbook.close()
 
@@ -186,7 +186,7 @@ def test_blank_templates_are_accepted_by_loader(
     assert data.configuration.hospital_rules == ()
     assert (
         data.configuration.assignment_settings.met_weight_per_pathologist
-        == Decimal("100")
+        == Decimal("200")
     )
     assert (
         data.configuration.assignment_settings.wh_starting_weight
@@ -194,3 +194,18 @@ def test_blank_templates_are_accepted_by_loader(
     )
     assert data.daily.accessions == ()
     assert data.daily.staffing == ()
+
+def test_routing_override_template_includes_weight_cap(tmp_path: Path) -> None:
+    path = tmp_path / "sorting_configuration.xlsx"
+    create_configuration_template(path)
+    workbook = load_workbook(path)
+    worksheet = workbook["RoutingOverrides"]
+
+    assert [cell.value for cell in worksheet[1]][-1] == "weight_cap"
+    assert (
+        "preferred_until_weight_cap"
+        in {
+            workbook["Lists"].cell(row=row, column=3).value
+            for row in range(2, workbook["Lists"].max_row + 1)
+        }
+    )

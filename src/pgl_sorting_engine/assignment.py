@@ -41,7 +41,7 @@ OMEGA_HOSPITAL = "Omega Hospital"
 class AssignmentSettings:
     """Editable MET and WH workload parameters."""
 
-    met_weight_per_pathologist: Decimal = Decimal("100")
+    met_weight_per_pathologist: Decimal = Decimal("200")
     wh_starting_weight: Decimal = Decimal("400")
 
     def __post_init__(self) -> None:
@@ -91,6 +91,9 @@ class AssignmentResult:
     decision_notes: tuple[str, ...]
     override_applied: bool = False
     override_application_notes: tuple[str, ...] = ()
+    override_matching_weight_before: Decimal | None = None
+    override_matching_weight_after: Decimal | None = None
+    override_weight_cap: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +272,10 @@ class SortingEngine:
             for location in LocationName
         }
         assignments: list[AssignmentResult] = []
+        override_weight_totals: dict[
+            tuple[str | None, str, str, LocationName],
+            Decimal,
+        ] = {}
 
         for forced_case in sorted(
             forced_cases,
@@ -313,6 +320,7 @@ class SortingEngine:
                 item=flexible_item,
                 targets=targets,
                 assigned_weights=assigned_weights,
+                override_weight_totals=override_weight_totals,
             )
 
             if flexible_assignment is None:
@@ -744,6 +752,10 @@ class SortingEngine:
         item: _EvaluatedAccession,
         targets: Mapping[LocationName, Decimal | None],
         assigned_weights: dict[LocationName, Decimal],
+        override_weight_totals: dict[
+            tuple[str | None, str, str, LocationName],
+            Decimal,
+        ],
     ) -> AssignmentResult | None:
         """Select the best ordinary location for a flexible accession."""
         candidates = self._available_flexible_locations(
@@ -751,6 +763,41 @@ class SortingEngine:
             targets=targets,
             assigned_weights=assigned_weights,
         )
+
+        cap_destination = (
+            item.eligibility.preferred_until_weight_cap_location
+        )
+        cap_rule = item.eligibility.override_rule
+        cap_value: Decimal | None = None
+        cap_before: Decimal | None = None
+        cap_after: Decimal | None = None
+        cap_key: tuple[str | None, str, str, LocationName] | None = None
+        cap_override_used = False
+        cap_would_be_exceeded = False
+
+        if cap_destination is not None:
+            if (
+                cap_rule is None
+                or cap_rule.mode
+                is not RoutingOverrideMode.PREFERRED_UNTIL_WEIGHT_CAP
+                or cap_rule.weight_cap is None
+            ):
+                raise RuntimeError(
+                    "Validated preferred-until-weight-cap rule is incomplete."
+                )
+
+            cap_value = cap_rule.weight_cap
+            cap_key = (*cap_rule.match_key, cap_destination)
+            cap_before = override_weight_totals.get(cap_key, ZERO_WEIGHT)
+            proposed_cap_weight = cap_before + item.accession.weight
+
+            if proposed_cap_weight > cap_value:
+                cap_would_be_exceeded = True
+                candidates = tuple(
+                    location
+                    for location in candidates
+                    if location != cap_destination
+                )
 
         if not candidates:
             return None
@@ -760,7 +807,14 @@ class SortingEngine:
         )
         soft_override_used = False
 
-        if soft_destination is not None and soft_destination in candidates:
+        if (
+            cap_destination is not None
+            and not cap_would_be_exceeded
+            and cap_destination in candidates
+        ):
+            selected_location = cap_destination
+            cap_override_used = True
+        elif soft_destination is not None and soft_destination in candidates:
             soft_target = self._required_target(
                 targets,
                 soft_destination,
@@ -793,6 +847,14 @@ class SortingEngine:
         after = before + item.accession.weight
         assigned_weights[selected_location] = after
 
+        if cap_override_used:
+            if cap_key is None or cap_before is None or cap_value is None:
+                raise RuntimeError(
+                    "Weight-cap assignment state was not initialized."
+                )
+            cap_after = cap_before + item.accession.weight
+            override_weight_totals[cap_key] = cap_after
+
         target = self._required_target(targets, selected_location)
         deficit_before = target - before
 
@@ -808,6 +870,54 @@ class SortingEngine:
             ),
             f"Location weight changed from {before} to {after}.",
         ]
+
+        if cap_override_used:
+            override_rule = item.eligibility.override_rule
+            override_name = (
+                override_rule.rule_name
+                if override_rule is not None
+                else "unnamed override"
+            )
+            notes.append(
+                f"Routing override {override_name!r} sent the accession to "
+                f"{selected_location.value}. Matching weight changed from "
+                f"{cap_before} to {cap_after} under the strict cap of "
+                f"{cap_value}."
+            )
+        elif cap_would_be_exceeded:
+            override_rule = item.eligibility.override_rule
+            override_name = (
+                override_rule.rule_name
+                if override_rule is not None
+                else "unnamed override"
+            )
+            proposed = (
+                cap_before + item.accession.weight
+                if cap_before is not None
+                else item.accession.weight
+            )
+            destination_name = (
+                cap_destination.value
+                if cap_destination is not None
+                else "the configured destination"
+            )
+            notes.append(
+                f"Routing override {override_name!r} did not route to "
+                f"{destination_name} because matching weight would increase "
+                f"from {cap_before} "
+                f"to {proposed}, exceeding the strict cap of {cap_value}. "
+                "The capped destination was excluded and routine distribution "
+                "was used."
+            )
+        elif (
+            cap_destination is not None
+            and cap_destination not in candidates
+        ):
+            notes.append(
+                f"The preferred-until-weight-cap destination "
+                f"{cap_destination.value} was not currently available under "
+                "the location workload policy; routine distribution was used."
+            )
 
         if soft_override_used:
             override_rule = item.eligibility.override_rule
@@ -868,7 +978,8 @@ class SortingEngine:
             target_weight=target,
             decision_notes=tuple(notes),
             override_applied=(
-                soft_override_used
+                cap_override_used
+                or soft_override_used
                 or (
                     item.eligibility.override_rule is not None
                     and item.eligibility.override_rule.mode
@@ -882,8 +993,12 @@ class SortingEngine:
                     note
                     for note in notes
                     if "override" in note.lower()
+                    or "strict cap" in note.lower()
                 )
             ),
+            override_matching_weight_before=cap_before,
+            override_matching_weight_after=cap_after,
+            override_weight_cap=cap_value,
         )
 
     def _candidate_sort_key(
