@@ -67,6 +67,11 @@ ASSIGNMENT_HEADERS = (
     "assigned_location",
     "method",
     "target_weight",
+    "override_rule",
+    "override_mode",
+    "override_applied",
+    "override_destination",
+    "override_notes",
     "decision_notes",
 )
 
@@ -93,9 +98,35 @@ AUDIT_HEADERS = (
     "assigned_weight_before",
     "assigned_weight_after",
     "target_weight",
+    "override_rule",
+    "override_mode",
+    "override_matched",
+    "override_activated",
+    "override_applied",
+    "override_destination",
+    "override_notes",
     "eligibility_notes",
     "assignment_notes",
     "exclusion_reasons",
+)
+
+
+OVERRIDE_MATCH_HEADERS = (
+    "accession_number",
+    "prefix",
+    "case_type",
+    "hospital",
+    "weight",
+    "rule_name",
+    "routing_mode",
+    "override_activated",
+    "override_applied",
+    "destination_location",
+    "preferred_locations",
+    "required_subspecialty",
+    "assigned_location",
+    "assignment_method",
+    "override_notes",
 )
 
 
@@ -122,6 +153,10 @@ def create_sorting_report(
     )
     _write_audit_sheet(
         workbook.create_sheet("Audit"),
+        result.assignments,
+    )
+    _write_override_matches_sheet(
+        workbook.create_sheet("Routing Override Matches"),
         result.assignments,
     )
     _write_distribution_grids(
@@ -213,6 +248,11 @@ def _write_assignments_sheet(
                 assignment.location.value,
                 assignment.method.value,
                 _optional_number(assignment.target_weight),
+                _override_rule_name(assignment),
+                _override_mode(assignment),
+                "Yes" if assignment.override_applied else "No",
+                _override_destination(assignment),
+                _override_notes(assignment),
                 " | ".join(assignment.decision_notes),
             ]
         )
@@ -221,7 +261,10 @@ def _write_assignments_sheet(
     _configure_data_sheet(
         worksheet,
         headers=ASSIGNMENT_HEADERS,
-        widths=(20, 10, 12, 36, 12, 20, 20, 16, 80),
+        widths=(
+            20, 10, 12, 36, 12, 20, 20, 16,
+            32, 38, 18, 22, 80, 80,
+        ),
     )
 
 
@@ -291,6 +334,13 @@ def _write_audit_sheet(
                 _number(assignment.assigned_weight_before),
                 _number(assignment.assigned_weight_after),
                 _optional_number(assignment.target_weight),
+                _override_rule_name(assignment),
+                _override_mode(assignment),
+                "Yes" if eligibility.matched_override else "No",
+                "Yes" if eligibility.override_activated else "No",
+                "Yes" if assignment.override_applied else "No",
+                _override_destination(assignment),
+                _override_notes(assignment),
                 " | ".join(eligibility.decision_notes),
                 " | ".join(assignment.decision_notes),
                 exclusion_reasons,
@@ -302,22 +352,88 @@ def _write_audit_sheet(
         worksheet,
         headers=AUDIT_HEADERS,
         widths=(
-            20,
-            20,
-            20,
-            35,
-            35,
-            20,
-            20,
-            26,
-            24,
-            23,
-            16,
-            90,
-            90,
-            100,
+            20, 20, 20, 35, 35, 20, 20, 26, 24, 23, 16,
+            32, 38, 18, 20, 18, 22, 90, 90, 90, 100,
         ),
     )
+
+
+def _write_override_matches_sheet(
+    worksheet: Worksheet,
+    assignments: Sequence[AssignmentResult],
+) -> None:
+    """Write every assigned accession that matched an override rule."""
+    _write_headers(worksheet, 1, OVERRIDE_MATCH_HEADERS)
+
+    matched = (
+        assignment
+        for assignment in assignments
+        if assignment.eligibility.override_rule is not None
+    )
+    for row_number, assignment in enumerate(matched, start=2):
+        rule = assignment.eligibility.override_rule
+        if rule is None:
+            continue
+        worksheet.append(
+            [
+                assignment.accession.accession_number,
+                assignment.accession.prefix,
+                assignment.accession.case_type,
+                assignment.accession.hospital,
+                _number(assignment.accession.weight),
+                rule.rule_name,
+                rule.mode.value,
+                (
+                    "Yes"
+                    if assignment.eligibility.override_activated
+                    else "No"
+                ),
+                "Yes" if assignment.override_applied else "No",
+                (
+                    rule.destination_location.value
+                    if rule.destination_location is not None
+                    else ""
+                ),
+                _join_locations(rule.preferred_locations),
+                rule.required_subspecialty or "",
+                assignment.location.value,
+                assignment.method.value,
+                _override_notes(assignment),
+            ]
+        )
+        _apply_number_formats(worksheet, row_number, columns=(5,))
+
+    _configure_data_sheet(
+        worksheet,
+        headers=OVERRIDE_MATCH_HEADERS,
+        widths=(
+            20, 10, 12, 36, 12, 32, 38, 20, 18, 22,
+            34, 28, 20, 20, 90,
+        ),
+    )
+
+
+def _override_rule_name(assignment: AssignmentResult) -> str:
+    rule = assignment.eligibility.override_rule
+    return rule.rule_name if rule is not None else ""
+
+
+def _override_mode(assignment: AssignmentResult) -> str:
+    rule = assignment.eligibility.override_rule
+    return rule.mode.value if rule is not None else ""
+
+
+def _override_destination(assignment: AssignmentResult) -> str:
+    rule = assignment.eligibility.override_rule
+    if rule is None or rule.destination_location is None:
+        return ""
+    return rule.destination_location.value
+
+
+def _override_notes(assignment: AssignmentResult) -> str:
+    notes = [*assignment.eligibility.override_notes]
+    notes.extend(assignment.override_application_notes)
+    return " | ".join(dict.fromkeys(notes))
 
 
 def _write_distribution_grids(

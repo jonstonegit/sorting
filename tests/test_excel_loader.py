@@ -385,3 +385,48 @@ def test_semicolon_separated_locations_are_supported(
             LocationName.BRG,
         }
     )
+
+def test_optional_routing_overrides_are_loaded(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_workbook(configuration_path)
+    create_daily_workbook(daily_path)
+
+    workbook = load_workbook(configuration_path)
+    overrides = workbook.create_sheet("RoutingOverrides")
+    overrides.append(
+        [
+            "rule_name",
+            "hospital",
+            "prefix",
+            "case_type",
+            "routing_mode",
+            "destination_location",
+            "preferred_locations",
+            "required_subspecialty",
+        ]
+    )
+    overrides.append(
+        [
+            "Track AB-GI",
+            None,
+            "AB",
+            "GI",
+            "identify_only",
+            None,
+            None,
+            None,
+        ]
+    )
+    workbook.save(configuration_path)
+
+    data = load_sorting_workbooks(
+        configuration_path=configuration_path,
+        daily_path=daily_path,
+    )
+
+    assert len(data.configuration.override_rules) == 1
+    assert data.configuration.override_rules[0].rule_name == "Track AB-GI"

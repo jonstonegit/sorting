@@ -9,7 +9,11 @@ from pgl_sorting_engine.eligibility import (
     EligibilityResult,
     EligibilityService,
 )
-from pgl_sorting_engine.enums import AssignmentMethod, LocationName
+from pgl_sorting_engine.enums import (
+    AssignmentMethod,
+    LocationName,
+    RoutingOverrideMode,
+)
 from pgl_sorting_engine.exceptions import (
     DuplicateAccessionError,
     SortingEngineError,
@@ -85,6 +89,8 @@ class AssignmentResult:
     assigned_weight_after: Decimal
     target_weight: Decimal | None
     decision_notes: tuple[str, ...]
+    override_applied: bool = False
+    override_application_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,40 +270,73 @@ class SortingEngine:
         }
         assignments: list[AssignmentResult] = []
 
-        for forced in sorted(
+        for forced_case in sorted(
             forced_cases,
-            key=lambda forced: self._accession_sort_key(forced.item),
+            key=lambda item: self._accession_sort_key(
+                item.item
+            ),
         ):
-            assignment = self._assign_forced(
-                forced=forced,
+            forced_assignment = self._assign_forced(
+                forced=forced_case,
                 assigned_weights=assigned_weights,
             )
-            assignments.append(assignment)
-            assigned_counts[assignment.location] += 1
 
-        for item in sorted(
+            assignments.append(forced_assignment)
+
+            assigned_counts[
+                forced_assignment.location
+            ] += 1
+
+
+        for mandatory_item in sorted(
             mandatory_cases,
             key=self._accession_sort_key,
         ):
-            assignment = self._assign_mandatory(
-                item=item,
+            mandatory_assignment = self._assign_mandatory(
+                item=mandatory_item,
                 targets=targets,
                 assigned_weights=assigned_weights,
             )
-            assignments.append(assignment)
-            assigned_counts[assignment.location] += 1
 
-        for item in sorted(
+            assignments.append(mandatory_assignment)
+
+            assigned_counts[
+                mandatory_assignment.location
+            ] += 1
+
+
+        for flexible_item in sorted(
             flexible_cases,
             key=self._accession_sort_key,
         ):
-            assignment = self._assign_flexible(
-                item=item,
+            flexible_assignment = self._assign_flexible(
+                item=flexible_item,
                 targets=targets,
                 assigned_weights=assigned_weights,
             )
-            assignments.append(assignment)
-            assigned_counts[assignment.location] += 1
+
+            if flexible_assignment is None:
+                unassigned.append(
+                    self._create_policy_unassigned_result(
+                        item=flexible_item,
+                        error_code=(
+                            "NO_AVAILABLE_LOCATION_AFTER_CAPS"
+                        ),
+                        summary=(
+                            "Accession "
+                            f"{flexible_item.accession.accession_number} "
+                            "had no available destination after "
+                            "workload caps were applied."
+                        ),
+                    )
+                )
+                continue
+
+            assignments.append(flexible_assignment)
+
+            assigned_counts[
+                flexible_assignment.location
+            ] += 1
 
         summaries = self._build_location_summaries(
             targets=targets,
@@ -682,6 +721,22 @@ class SortingEngine:
                     f"changed from {before} to {after}."
                 ),
             ),
+            override_applied=(
+                item.eligibility.override_rule is not None
+                and item.eligibility.override_activated
+            ),
+            override_application_notes=(
+                (
+                    f"Routing override "
+                    f"{item.eligibility.override_rule.rule_name!r} "
+                    "created the mandatory destination."
+                ),
+            )
+            if (
+                item.eligibility.override_rule is not None
+                and item.eligibility.override_activated
+            )
+            else (),
         )
 
     def _assign_flexible(
@@ -689,25 +744,50 @@ class SortingEngine:
         item: _EvaluatedAccession,
         targets: Mapping[LocationName, Decimal | None],
         assigned_weights: dict[LocationName, Decimal],
-    ) -> AssignmentResult:
+    ) -> AssignmentResult | None:
         """Select the best ordinary location for a flexible accession."""
-        candidates = self._normal_eligible_locations(item)
+        candidates = self._available_flexible_locations(
+            item=item,
+            targets=targets,
+            assigned_weights=assigned_weights,
+        )
 
         if not candidates:
-            raise RuntimeError(
-                "Flexible assignment called without a policy-eligible "
-                "location."
-            )
+            return None
 
-        selected_location = min(
-            candidates,
-            key=lambda location: self._candidate_sort_key(
-                location=location,
-                eligibility=item.eligibility,
-                targets=targets,
-                assigned_weights=assigned_weights,
-            ),
+        soft_destination = (
+            item.eligibility.preferred_until_target_location
         )
+        soft_override_used = False
+
+        if soft_destination is not None and soft_destination in candidates:
+            soft_target = self._required_target(
+                targets,
+                soft_destination,
+            )
+            if assigned_weights[soft_destination] < soft_target:
+                selected_location = soft_destination
+                soft_override_used = True
+            else:
+                selected_location = min(
+                    candidates,
+                    key=lambda location: self._candidate_sort_key(
+                        location=location,
+                        eligibility=item.eligibility,
+                        targets=targets,
+                        assigned_weights=assigned_weights,
+                    ),
+                )
+        else:
+            selected_location = min(
+                candidates,
+                key=lambda location: self._candidate_sort_key(
+                    location=location,
+                    eligibility=item.eligibility,
+                    targets=targets,
+                    assigned_weights=assigned_weights,
+                ),
+            )
 
         before = assigned_weights[selected_location]
         after = before + item.accession.weight
@@ -719,36 +799,63 @@ class SortingEngine:
         notes = [
             (
                 f"Selected {selected_location.value} from "
-                f"{len(candidates)} policy-eligible locations."
+                f"{len(candidates)} currently available locations."
             ),
             (
                 f"Target weight was {target}; assigned weight before "
                 f"selection was {before}; remaining target deficit "
                 f"was {deficit_before}."
             ),
-            (
-                f"Location weight changed from {before} "
-                f"to {after}."
-            ),
+            f"Location weight changed from {before} to {after}.",
         ]
+
+        if soft_override_used:
+            override_rule = item.eligibility.override_rule
+            override_name = (
+                override_rule.rule_name
+                if override_rule is not None
+                else "unnamed override"
+            )
+            notes.append(
+                f"Routing override {override_name!r} "
+                f"sent the accession to {selected_location.value} because "
+                f"its pre-assignment weight {before} was below target "
+                f"{target}. The final case was allowed to cross the target."
+            )
+            if after >= target:
+                notes.append(
+                    f"{selected_location.value} is now closed to additional "
+                    "target-based flexible assignments for this run."
+                )
+        elif (
+            item.eligibility.preferred_until_target_location is not None
+        ):
+            destination = (
+                item.eligibility.preferred_until_target_location
+            )
+            destination_target = self._required_target(
+                targets,
+                destination,
+            )
+            notes.append(
+                f"The preferred-until-target override did not route to "
+                f"{destination.value} because its assigned weight "
+                f"{assigned_weights[destination]} was not below target "
+                f"{destination_target}; routine distribution was used."
+            )
 
         if selected_location == LocationName.WH:
             starting_weight = self._wh_starting_weight()
             notes.append(
-                
-                    f"WH began with configured weight {starting_weight}; "
-                    f"its effective weight after assignment was "
-                    f"{starting_weight + after}."
-                
+                f"WH began with configured weight {starting_weight}; "
+                f"its effective weight after assignment was "
+                f"{starting_weight + after}."
             )
 
         if selected_location in item.eligibility.preferred_locations:
             notes.append(
-                
-                    f"{selected_location.value} was also a preferred "
-                    "location and preference was available as a "
-                    "tie-breaker."
-                
+                f"{selected_location.value} was a preferred location and "
+                "preference was available as a tie-breaker."
             )
 
         return AssignmentResult(
@@ -760,6 +867,23 @@ class SortingEngine:
             assigned_weight_after=after,
             target_weight=target,
             decision_notes=tuple(notes),
+            override_applied=(
+                soft_override_used
+                or (
+                    item.eligibility.override_rule is not None
+                    and item.eligibility.override_rule.mode
+                    is RoutingOverrideMode.PREFERRED
+                    and selected_location
+                    in item.eligibility.override_rule.preferred_locations
+                )
+            ),
+            override_application_notes=(
+                tuple(
+                    note
+                    for note in notes
+                    if "override" in note.lower()
+                )
+            ),
         )
 
     def _candidate_sort_key(
@@ -801,6 +925,28 @@ class SortingEngine:
             for location in item.eligibility.eligible_locations
             if location not in SPECIAL_ONLY_LOCATIONS
         )
+
+    def _available_flexible_locations(
+        self,
+        item: _EvaluatedAccession,
+        targets: Mapping[LocationName, Decimal | None],
+        assigned_weights: Mapping[LocationName, Decimal],
+    ) -> tuple[LocationName, ...]:
+        """Return ordinary locations still open to flexible work.
+
+        MET uses a one-case overshoot policy: a case may be assigned while
+        MET's pre-assignment weight is below target. After that case brings
+        MET to or above target, MET is excluded from additional flexible work.
+        Mandatory assignments are not limited by this cap.
+        """
+        locations: list[LocationName] = []
+        for location in self._normal_eligible_locations(item):
+            if location == LocationName.MET:
+                target = self._required_target(targets, location)
+                if assigned_weights[location] >= target:
+                    continue
+            locations.append(location)
+        return tuple(locations)
 
     @staticmethod
     def _required_target(

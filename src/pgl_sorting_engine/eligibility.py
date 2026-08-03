@@ -6,16 +6,15 @@ from types import MappingProxyType
 
 from pgl_sorting_engine.enums import (
     LocationName,
+    RoutingOverrideMode,
     SubspecialtyRequirement,
 )
 from pgl_sorting_engine.exceptions import RoutingConflictError
-from pgl_sorting_engine.models import (
-    Accession,
-    HospitalRoutingRule,
-)
+from pgl_sorting_engine.models import Accession, HospitalRoutingRule
 from pgl_sorting_engine.rules import (
     CaseTypeRule,
     PrefixRoutingRule,
+    RoutingOverrideRule,
     RoutingRuleSet,
 )
 from pgl_sorting_engine.staffing import DailySortingContext
@@ -23,20 +22,7 @@ from pgl_sorting_engine.staffing import DailySortingContext
 
 @dataclass(frozen=True, slots=True)
 class EligibilityResult:
-    """
-    Result of evaluating one accession against the routing rules.
-
-    Attributes:
-        accession: Accession being evaluated.
-        eligible_locations: Locations that may receive the accession.
-        preferred_locations: Eligible locations that should be considered
-            first during workload balancing.
-        required_location: Mandatory destination, when one exists.
-        subspecialty: Subspecialty associated with the case type.
-        subspecialty_requirement: Whether coverage is required or preferred.
-        exclusion_reasons: Reasons each ineligible location was excluded.
-        decision_notes: General notes describing the evaluation.
-    """
+    """Result of evaluating one accession against the routing rules."""
 
     accession: Accession
     eligible_locations: frozenset[LocationName]
@@ -46,6 +32,10 @@ class EligibilityResult:
     subspecialty_requirement: SubspecialtyRequirement
     exclusion_reasons: Mapping[LocationName, tuple[str, ...]]
     decision_notes: tuple[str, ...]
+    override_rule: RoutingOverrideRule | None = None
+    override_activated: bool = False
+    preferred_until_target_location: LocationName | None = None
+    override_notes: tuple[str, ...] = ()
 
     @property
     def is_assignable(self) -> bool:
@@ -57,6 +47,11 @@ class EligibilityResult:
         """Return whether the accession has a mandatory destination."""
         return self.required_location is not None
 
+    @property
+    def matched_override(self) -> bool:
+        """Return whether a configurable override matched the accession."""
+        return self.override_rule is not None
+
     def reasons_for_exclusion(
         self,
         location: LocationName,
@@ -66,30 +61,45 @@ class EligibilityResult:
 
 
 @dataclass(frozen=True, slots=True)
-class EligibilityService:
-    """
-    Evaluate accessions using routing rules and today's staffing context.
+class _OverrideEvaluation:
+    """Internal interpretation of a matched routing override."""
 
-    This service determines valid destinations only. It does not perform
-    workload balancing or make the final assignment among multiple eligible
-    locations.
-    """
+    rule: RoutingOverrideRule | None
+    required_location: LocationName | None = None
+    preferred_locations: tuple[LocationName, ...] = ()
+    preferred_until_target_location: LocationName | None = None
+    activated: bool = False
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class EligibilityService:
+    """Evaluate accessions using routing rules and today's staffing."""
 
     rules: RoutingRuleSet
     staffing_context: DailySortingContext
 
     def evaluate(self, accession: Accession) -> EligibilityResult:
-        """Calculate all eligible and preferred locations for an accession."""
+        """Calculate all eligible and preferred locations."""
         hospital_rule = self.rules.get_hospital_rule(accession.hospital)
         prefix_rule = self.rules.get_prefix_rule(accession.prefix)
-        case_type_rule = self.rules.get_case_type_rule(
-            accession.case_type
+        case_type_rule = self.rules.get_case_type_rule(accession.case_type)
+        override_rule = self.rules.find_override_rule(
+            hospital=accession.hospital,
+            prefix=accession.prefix,
+            case_type=accession.case_type,
+        )
+        override = self._evaluate_override(
+            rule=override_rule,
+            case_type_rule=case_type_rule,
         )
 
         required_location = self._resolve_required_location(
             accession=accession,
             hospital_rule=hospital_rule,
             prefix_rule=prefix_rule,
+            override_required=override.required_location,
+            override_rule=override.rule,
         )
 
         exclusion_reasons: dict[LocationName, tuple[str, ...]] = {}
@@ -103,17 +113,45 @@ class EligibilityService:
                 case_type_rule=case_type_rule,
                 required_location=required_location,
             )
-
             if reasons:
                 exclusion_reasons[location] = tuple(reasons)
             else:
                 eligible_locations.add(location)
+
+        override_preferences = tuple(
+            location
+            for location in override.preferred_locations
+            if location in eligible_locations
+        )
+        soft_target = override.preferred_until_target_location
+        override_notes = list(override.notes)
+        override_activated = override.activated
+
+        if soft_target is not None and soft_target not in eligible_locations:
+            override_notes.append(
+                f"Configured destination {soft_target.value} was not eligible; "
+                "the accession will use routine distribution."
+            )
+            soft_target = None
+            override_activated = False
+
+        if (
+            override.rule is not None
+            and override.rule.mode is RoutingOverrideMode.PREFERRED
+        ):
+            override_activated = bool(override_preferences)
+            if not override_preferences:
+                override_notes.append(
+                    "None of the configured preferred locations were eligible; "
+                    "the accession will use routine distribution."
+                )
 
         preferred_locations = self._calculate_preferences(
             eligible_locations=eligible_locations,
             prefix_rule=prefix_rule,
             case_type_rule=case_type_rule,
             required_location=required_location,
+            override_preferences=override_preferences,
         )
 
         decision_notes = self._build_decision_notes(
@@ -122,6 +160,8 @@ class EligibilityService:
             prefix_rule=prefix_rule,
             case_type_rule=case_type_rule,
             required_location=required_location,
+            override_rule=override.rule,
+            override_notes=tuple(override_notes),
         )
 
         return EligibilityResult(
@@ -133,40 +173,157 @@ class EligibilityService:
             subspecialty_requirement=case_type_rule.requirement,
             exclusion_reasons=MappingProxyType(exclusion_reasons),
             decision_notes=decision_notes,
+            override_rule=override.rule,
+            override_activated=override_activated,
+            preferred_until_target_location=soft_target,
+            override_notes=tuple(override_notes),
         )
+
+    def _evaluate_override(
+        self,
+        rule: RoutingOverrideRule | None,
+        case_type_rule: CaseTypeRule,
+    ) -> _OverrideEvaluation:
+        if rule is None:
+            return _OverrideEvaluation(rule=None)
+
+        matched = (
+            f"Matched routing override {rule.rule_name!r} "
+            f"({rule.mode.value})."
+        )
+
+        if rule.mode is RoutingOverrideMode.IDENTIFY_ONLY:
+            return _OverrideEvaluation(
+                rule=rule,
+                notes=(
+                    matched,
+                    "The rule identifies the accession but does not alter routing.",
+                ),
+            )
+
+        if rule.mode is RoutingOverrideMode.ALWAYS_REQUIRED:
+            destination = rule.destination_location
+            if destination is None:
+                raise RuntimeError(
+                    "Validated required routing rule has no destination."
+                )
+            return _OverrideEvaluation(
+                rule=rule,
+                required_location=destination,
+                activated=True,
+                notes=(
+                    matched,
+                    f"The rule requires {destination.value}.",
+                ),
+            )
+
+        if (
+            rule.mode
+            is RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT
+        ):
+            destination = rule.destination_location
+            subspecialty = (
+                rule.required_subspecialty
+                or case_type_rule.subspecialty
+            )
+            if destination is None or subspecialty is None:
+                raise RuntimeError(
+                    "Validated conditional routing rule is incomplete."
+                )
+
+            capability = self.staffing_context.get_location_capability(
+                destination
+            )
+            if capability.has_subspecialty(subspecialty):
+                return _OverrideEvaluation(
+                    rule=rule,
+                    required_location=destination,
+                    activated=True,
+                    notes=(
+                        matched,
+                        f"{destination.value} has {subspecialty} coverage, "
+                        "so the conditional requirement was activated.",
+                    ),
+                )
+
+            return _OverrideEvaluation(
+                rule=rule,
+                notes=(
+                    matched,
+                    f"{destination.value} does not have {subspecialty} "
+                    "coverage, so the conditional requirement was not "
+                    "activated and routine routing applies.",
+                ),
+            )
+
+        if rule.mode is RoutingOverrideMode.PREFERRED:
+            return _OverrideEvaluation(
+                rule=rule,
+                preferred_locations=rule.preferred_locations,
+                notes=(
+                    matched,
+                    "Eligible configured locations will be used as ordered "
+                    "preferences during routine balancing.",
+                ),
+            )
+
+        if rule.mode is RoutingOverrideMode.PREFERRED_UNTIL_TARGET:
+            destination = rule.destination_location
+            if destination is None:
+                raise RuntimeError(
+                    "Validated until-target routing rule has no destination."
+                )
+            return _OverrideEvaluation(
+                rule=rule,
+                preferred_until_target_location=destination,
+                activated=True,
+                notes=(
+                    matched,
+                    f"{destination.value} will receive the case while its "
+                    "pre-assignment workload is below target; the final case "
+                    "may cross the target.",
+                ),
+            )
+
+        raise RuntimeError(f"Unsupported routing override mode: {rule.mode}.")
 
     def _resolve_required_location(
         self,
         accession: Accession,
         hospital_rule: HospitalRoutingRule,
         prefix_rule: PrefixRoutingRule,
+        override_required: LocationName | None,
+        override_rule: RoutingOverrideRule | None,
     ) -> LocationName | None:
-        """
-        Resolve mandatory hospital and prefix destinations.
+        """Resolve hospital, prefix, and override mandatory destinations."""
+        requirements: list[tuple[str, LocationName]] = []
 
-        Raises:
-            RoutingConflictError: If the hospital and prefix require
-                different locations, or if a mandatory destination is
-                prohibited by another applicable rule.
-        """
-        hospital_required = hospital_rule.required_location
-        prefix_required = prefix_rule.required_location
+        if hospital_rule.required_location is not None:
+            requirements.append(
+                (f"hospital {hospital_rule.hospital}", hospital_rule.required_location)
+            )
+        if prefix_rule.required_location is not None:
+            requirements.append(
+                (f"prefix {prefix_rule.prefix}", prefix_rule.required_location)
+            )
+        if override_required is not None:
+            name = override_rule.rule_name if override_rule else "override"
+            requirements.append((f"routing override {name}", override_required))
 
-        if (
-            hospital_required is not None
-            and prefix_required is not None
-            and hospital_required != prefix_required
-        ):
+        unique_destinations = {destination for _, destination in requirements}
+        if len(unique_destinations) > 1:
+            description = ", while ".join(
+                f"{source} requires {destination.value}"
+                for source, destination in requirements
+            )
             raise RoutingConflictError(
                 f"Accession {accession.accession_number} has conflicting "
-                f"mandatory destinations: hospital "
-                f"{hospital_rule.hospital} requires "
-                f"{hospital_required.value}, while prefix "
-                f"{prefix_rule.prefix} requires {prefix_required.value}."
+                f"mandatory destinations: {description}."
             )
 
-        required_location = hospital_required or prefix_required
-
+        required_location = (
+            requirements[0][1] if requirements else None
+        )
         if required_location is None:
             return None
 
@@ -176,14 +333,12 @@ class EligibilityService:
                 f"to {required_location.value}, but hospital "
                 f"{hospital_rule.hospital} does not allow that location."
             )
-
         if required_location not in prefix_rule.allowed_locations:
             raise RoutingConflictError(
                 f"Accession {accession.accession_number} is required to go "
                 f"to {required_location.value}, but prefix "
                 f"{prefix_rule.prefix} does not allow that location."
             )
-
         return required_location
 
     def _evaluate_location(
@@ -194,53 +349,37 @@ class EligibilityService:
         case_type_rule: CaseTypeRule,
         required_location: LocationName | None,
     ) -> list[str]:
-        """Return all reasons a location cannot receive the accession."""
         reasons: list[str] = []
 
-        if (
-            required_location is not None
-            and location != required_location
-        ):
+        if required_location is not None and location != required_location:
             reasons.append(
-                f"A mandatory routing rule requires "
-                f"{required_location.value}."
+                f"A mandatory routing rule requires {required_location.value}."
             )
-
         if location not in hospital_rule.allowed_locations:
             reasons.append(
                 f"Hospital {hospital_rule.hospital} does not allow "
                 f"{location.value}."
             )
-
         if location not in prefix_rule.allowed_locations:
             reasons.append(
-                f"Prefix {prefix_rule.prefix} does not allow "
-                f"{location.value}."
+                f"Prefix {prefix_rule.prefix} does not allow {location.value}."
             )
 
-        capability = self.staffing_context.get_location_capability(
-            location
-        )
-
+        capability = self.staffing_context.get_location_capability(location)
         if not capability.is_active:
             reasons.append(
                 f"No pathologists are staffed at {location.value}."
             )
-
         if (
             case_type_rule.requirement
             is SubspecialtyRequirement.REQUIRED
             and case_type_rule.subspecialty is not None
-            and not capability.has_subspecialty(
-                case_type_rule.subspecialty
-            )
+            and not capability.has_subspecialty(case_type_rule.subspecialty)
         ):
             reasons.append(
-                f"Required subspecialty "
-                f"{case_type_rule.subspecialty} is unavailable at "
-                f"{location.value}."
+                f"Required subspecialty {case_type_rule.subspecialty} is "
+                f"unavailable at {location.value}."
             )
-
         return reasons
 
     def _calculate_preferences(
@@ -249,18 +388,14 @@ class EligibilityService:
         prefix_rule: PrefixRoutingRule,
         case_type_rule: CaseTypeRule,
         required_location: LocationName | None,
+        override_preferences: tuple[LocationName, ...],
     ) -> tuple[LocationName, ...]:
-        """Calculate an ordered list of preferred eligible locations."""
         if required_location is not None:
             return ()
 
         preferred: list[LocationName] = []
-
-        for location in prefix_rule.preferred_locations:
-            if (
-                location in eligible_locations
-                and location not in preferred
-            ):
+        for location in (*override_preferences, *prefix_rule.preferred_locations):
+            if location in eligible_locations and location not in preferred:
                 preferred.append(location)
 
         if (
@@ -271,21 +406,14 @@ class EligibilityService:
             for location in LocationName:
                 if location not in eligible_locations:
                     continue
-
-                capability = (
-                    self.staffing_context.get_location_capability(
-                        location
-                    )
+                capability = self.staffing_context.get_location_capability(
+                    location
                 )
-
                 if (
-                    capability.has_subspecialty(
-                        case_type_rule.subspecialty
-                    )
+                    capability.has_subspecialty(case_type_rule.subspecialty)
                     and location not in preferred
                 ):
                     preferred.append(location)
-
         return tuple(preferred)
 
     def _build_decision_notes(
@@ -295,8 +423,9 @@ class EligibilityService:
         prefix_rule: PrefixRoutingRule,
         case_type_rule: CaseTypeRule,
         required_location: LocationName | None,
+        override_rule: RoutingOverrideRule | None,
+        override_notes: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """Create general audit notes for the eligibility evaluation."""
         hospital_locations = ", ".join(
             location.value
             for location in sorted(
@@ -304,7 +433,6 @@ class EligibilityService:
                 key=lambda item: item.value,
             )
         )
-
         prefix_locations = ", ".join(
             location.value
             for location in sorted(
@@ -314,29 +442,21 @@ class EligibilityService:
         )
 
         notes = [
-            (
-                f"Hospital {hospital_rule.hospital} allows: "
-                f"{hospital_locations}."
-            ),
-            (
-                f"Prefix {prefix_rule.prefix} allows: "
-                f"{prefix_locations}."
-            ),
+            f"Hospital {hospital_rule.hospital} allows: {hospital_locations}.",
+            f"Prefix {prefix_rule.prefix} allows: {prefix_locations}.",
             (
                 f"Case type {accession.case_type} has subspecialty "
                 f"requirement {case_type_rule.requirement.value}."
             ),
         ]
-
         if case_type_rule.subspecialty is not None:
             notes.append(
-                f"Associated subspecialty: "
-                f"{case_type_rule.subspecialty}."
+                f"Associated subspecialty: {case_type_rule.subspecialty}."
             )
-
+        if override_rule is not None:
+            notes.extend(override_notes)
         if required_location is not None:
             notes.append(
                 f"Mandatory destination: {required_location.value}."
             )
-
         return tuple(notes)

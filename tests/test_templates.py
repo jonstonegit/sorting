@@ -41,6 +41,7 @@ def test_configuration_template_has_expected_sheets(
         "CaseTypes",
         "Prefixes",
         "Hospitals",
+        "RoutingOverrides",
         "AssignmentSettings",
         "Lists",
     ]

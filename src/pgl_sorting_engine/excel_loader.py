@@ -16,6 +16,7 @@ from pgl_sorting_engine.assignment import (
 from pgl_sorting_engine.eligibility import EligibilityService
 from pgl_sorting_engine.enums import (
     LocationName,
+    RoutingOverrideMode,
     SubspecialtyRequirement,
 )
 from pgl_sorting_engine.exceptions import (
@@ -33,6 +34,7 @@ from pgl_sorting_engine.models import (
 from pgl_sorting_engine.rules import (
     CaseTypeRule,
     PrefixRoutingRule,
+    RoutingOverrideRule,
     RoutingRuleSet,
 )
 from pgl_sorting_engine.staffing import DailySortingContext
@@ -84,6 +86,18 @@ ASSIGNMENT_SETTINGS_HEADERS = (
     "wh_starting_weight",
 )
 
+ROUTING_OVERRIDES_SHEET = "RoutingOverrides"
+ROUTING_OVERRIDE_HEADERS = (
+    "rule_name",
+    "hospital",
+    "prefix",
+    "case_type",
+    "routing_mode",
+    "destination_location",
+    "preferred_locations",
+    "required_subspecialty",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SortingConfigurationData:
@@ -94,6 +108,7 @@ class SortingConfigurationData:
     prefix_rules: tuple[PrefixRoutingRule, ...]
     hospital_rules: tuple[HospitalRoutingRule, ...]
     assignment_settings: AssignmentSettings
+    override_rules: tuple[RoutingOverrideRule, ...] = ()
 
     def build_rule_set(self) -> RoutingRuleSet:
         """Build the validated routing-rule collection."""
@@ -101,6 +116,7 @@ class SortingConfigurationData:
             case_type_rules=self.case_type_rules,
             prefix_rules=self.prefix_rules,
             hospital_rules=self.hospital_rules,
+            override_rules=self.override_rules,
         )
 
 
@@ -198,6 +214,10 @@ def load_sorting_workbooks(
             configuration_workbook,
             issues,
         )
+        override_rules = _load_routing_override_rules(
+            configuration_workbook,
+            issues,
+        )
         assignment_settings = _load_assignment_settings(
             configuration_workbook,
             issues,
@@ -221,6 +241,7 @@ def load_sorting_workbooks(
         case_type_rules=tuple(case_type_rules),
         prefix_rules=tuple(prefix_rules),
         hospital_rules=tuple(hospital_rules),
+        override_rules=tuple(override_rules),
         assignment_settings=assignment_settings,
     )
 
@@ -543,6 +564,24 @@ def _parse_requirement(
         raise ValueError(
             f"Unknown requirement {text!r}. "
             f"Expected one of: {allowed_values}."
+        ) from exc
+
+
+def _parse_routing_override_mode(
+    value: object,
+) -> RoutingOverrideMode:
+    """Parse a routing-override mode."""
+    text = _required_text(value, "Routing mode")
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    try:
+        return RoutingOverrideMode(normalized)
+    except ValueError as exc:
+        allowed_values = ", ".join(
+            mode.value for mode in RoutingOverrideMode
+        )
+        raise ValueError(
+            f"Unknown routing mode {text!r}. Expected one of: "
+            f"{allowed_values}."
         ) from exc
 
 
@@ -875,6 +914,73 @@ def _load_hospital_rules(
                 issues=issues,
                 workbook=CONFIGURATION_WORKBOOK,
                 sheet="Hospitals",
+                row_number=row_number,
+                exc=exc,
+            )
+
+    return records
+
+
+def _load_routing_override_rules(
+    workbook: Any,
+    issues: list[SpreadsheetIssue],
+) -> list[RoutingOverrideRule]:
+    """Load optional prefix/case-type and hospital-specific overrides."""
+    if ROUTING_OVERRIDES_SHEET not in workbook.sheetnames:
+        return []
+
+    records: list[RoutingOverrideRule] = []
+    seen_keys: dict[tuple[str | None, str, str], int] = {}
+
+    for row_number, values in _sheet_rows(
+        workbook=workbook,
+        workbook_label=CONFIGURATION_WORKBOOK,
+        sheet_name=ROUTING_OVERRIDES_SHEET,
+        required_headers=ROUTING_OVERRIDE_HEADERS,
+        issues=issues,
+    ):
+        try:
+            rule = RoutingOverrideRule(
+                rule_name=_required_text(
+                    values["rule_name"],
+                    "Rule name",
+                ),
+                hospital=_optional_text(values["hospital"]),
+                prefix=_required_text(values["prefix"], "Prefix"),
+                case_type=_required_text(
+                    values["case_type"],
+                    "Case type",
+                ),
+                mode=_parse_routing_override_mode(
+                    values["routing_mode"]
+                ),
+                destination_location=_parse_optional_location(
+                    values["destination_location"]
+                ),
+                preferred_locations=_parse_location_tuple(
+                    values["preferred_locations"]
+                ),
+                required_subspecialty=_optional_text(
+                    values["required_subspecialty"]
+                ),
+            )
+
+            previous_row = seen_keys.get(rule.match_key)
+            if previous_row is not None:
+                scope = rule.hospital or "all hospitals"
+                raise ValueError(
+                    f"Duplicate routing override for {scope}, "
+                    f"{rule.prefix}-{rule.case_type}; first seen on "
+                    f"row {previous_row}."
+                )
+
+            seen_keys[rule.match_key] = row_number
+            records.append(rule)
+        except (TypeError, ValueError, ConfigurationError) as exc:
+            _append_row_issue(
+                issues=issues,
+                workbook=CONFIGURATION_WORKBOOK,
+                sheet=ROUTING_OVERRIDES_SHEET,
                 row_number=row_number,
                 exc=exc,
             )

@@ -54,6 +54,14 @@ REQUIREMENTS = (
     "not_required",
 )
 
+ROUTING_MODES = (
+    "identify_only",
+    "always_required",
+    "required_if_subspecialist_present",
+    "preferred",
+    "preferred_until_target",
+)
+
 HEADER_FILL = PatternFill(
     fill_type="solid",
     fgColor="1F4E78",
@@ -130,6 +138,7 @@ def create_configuration_template(
     * CaseTypes
     * Prefixes
     * Hospitals
+    * RoutingOverrides
     * AssignmentSettings
     """
     path = Path(output_path).expanduser()
@@ -144,6 +153,7 @@ def create_configuration_template(
     case_types = workbook.create_sheet("CaseTypes")
     prefixes = workbook.create_sheet("Prefixes")
     hospitals = workbook.create_sheet("Hospitals")
+    routing_overrides = workbook.create_sheet("RoutingOverrides")
     assignment_settings = workbook.create_sheet("AssignmentSettings")
     lists = workbook.create_sheet("Lists")
 
@@ -200,6 +210,23 @@ def create_configuration_template(
         tab_color="A5A5A5",
     )
 
+    _configure_input_sheet(
+        worksheet=routing_overrides,
+        headers=(
+            "rule_name",
+            "hospital",
+            "prefix",
+            "case_type",
+            "routing_mode",
+            "destination_location",
+            "preferred_locations",
+            "required_subspecialty",
+        ),
+        widths=(32, 32, 12, 14, 38, 24, 34, 28),
+        table_name="RoutingOverridesTable",
+        tab_color="8064A2",
+    )
+
     _add_two_letter_validation(
         worksheet=case_types,
         cell_range=f"A2:A{MAX_INPUT_ROW}",
@@ -212,9 +239,22 @@ def create_configuration_template(
         field_name="prefix",
     )
 
+    _add_two_letter_validation(
+        worksheet=routing_overrides,
+        cell_range=f"C2:C{MAX_INPUT_ROW}",
+        field_name="prefix",
+    )
+
+    _add_two_letter_validation(
+        worksheet=routing_overrides,
+        cell_range=f"D2:D{MAX_INPUT_ROW}",
+        field_name="case type",
+    )
+
     location_formula = f'"{",".join(LOCATIONS)}"'
 
     requirement_formula = f'"{",".join(REQUIREMENTS)}"'
+    routing_mode_formula = f'"{",".join(ROUTING_MODES)}"'
 
     _add_list_validation(
         worksheet=case_types,
@@ -240,11 +280,28 @@ def create_configuration_template(
         error="Select a valid location.",
     )
 
+    _add_list_validation(
+        worksheet=routing_overrides,
+        cell_range=f"E2:E{MAX_INPUT_ROW}",
+        formula=routing_mode_formula,
+        prompt="Select how the routing override should behave.",
+        error="Select a valid routing mode.",
+    )
+
+    _add_list_validation(
+        worksheet=routing_overrides,
+        cell_range=f"F2:F{MAX_INPUT_ROW}",
+        formula=location_formula,
+        prompt="Select the destination used by required or until-target rules.",
+        error="Select a valid location.",
+    )
+
     _add_configuration_comments(
         pathologists=pathologists,
         case_types=case_types,
         prefixes=prefixes,
         hospitals=hospitals,
+        routing_overrides=routing_overrides,
     )
 
     lists.sheet_state = "hidden"
@@ -507,6 +564,7 @@ def _build_configuration_lists(worksheet: Any) -> None:
     """Populate validation choices for the configuration workbook."""
     worksheet["A1"] = "Locations"
     worksheet["B1"] = "Requirements"
+    worksheet["C1"] = "RoutingModes"
 
     for row_number, location in enumerate(LOCATIONS, start=2):
         worksheet.cell(
@@ -523,6 +581,13 @@ def _build_configuration_lists(worksheet: Any) -> None:
             row=row_number,
             column=2,
             value=requirement,
+        )
+
+    for row_number, mode in enumerate(ROUTING_MODES, start=2):
+        worksheet.cell(
+            row=row_number,
+            column=3,
+            value=mode,
         )
 
 
@@ -543,6 +608,7 @@ def _add_configuration_comments(
     case_types: Any,
     prefixes: Any,
     hospitals: Any,
+    routing_overrides: Any,
 ) -> None:
     """Explain fields that accept delimited lists or special values."""
     pathologists["A1"].comment = Comment(
@@ -594,6 +660,37 @@ def _add_configuration_comments(
         "PGL Sorting Engine",
     )
 
+    routing_overrides["A1"].comment = Comment(
+        "A readable name that will appear in the audit report.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["B1"].comment = Comment(
+        "Optional. Leave blank to apply the rule to all hospitals. An exact "
+        "hospital rule takes priority over a general pair rule.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["E1"].comment = Comment(
+        "Modes: identify_only, always_required, "
+        "required_if_subspecialist_present, preferred, or "
+        "preferred_until_target.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["F1"].comment = Comment(
+        "Required for always_required, required_if_subspecialist_present, "
+        "and preferred_until_target.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["G1"].comment = Comment(
+        "Used only for preferred mode. Separate ordered locations with "
+        "semicolons.",
+        "PGL Sorting Engine",
+    )
+    routing_overrides["H1"].comment = Comment(
+        "Optional for required_if_subspecialist_present. When blank, the "
+        "CaseTypes subspecialty is used.",
+        "PGL Sorting Engine",
+    )
+
 
 def _build_configuration_instructions(
     worksheet: Any,
@@ -638,6 +735,12 @@ def _build_configuration_instructions(
             "originating hospital.",
         ),
         (
+            "RoutingOverrides",
+            "Identifies or routes prefix/case-type pairs, optionally for one "
+            "hospital. Hospital-specific rules take priority over general "
+            "pair rules.",
+        ),
+        (
             "AssignmentSettings",
             "Sets MET weight per pathologist and WH starting weight. "
             "TEXAS and OMEGA rules are fixed in the application.",
@@ -668,6 +771,10 @@ def _build_configuration_instructions(
     worksheet["A14"] = "Requirement values"
     worksheet["A14"].font = SECTION_FONT
     worksheet["B14"] = "; ".join(REQUIREMENTS)
+
+    worksheet["A16"] = "Routing override modes"
+    worksheet["A16"].font = SECTION_FONT
+    worksheet["B16"] = "; ".join(ROUTING_MODES)
 
 
 def _build_daily_instructions(

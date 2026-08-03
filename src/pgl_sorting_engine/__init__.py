@@ -15,6 +15,7 @@ from pgl_sorting_engine.eligibility import (
 from pgl_sorting_engine.enums import (
     AssignmentMethod,
     LocationName,
+    RoutingOverrideMode,
     SubspecialtyRequirement,
 )
 from pgl_sorting_engine.excel_loader import (
@@ -49,6 +50,7 @@ from pgl_sorting_engine.reporting import create_sorting_report
 from pgl_sorting_engine.rules import (
     CaseTypeRule,
     PrefixRoutingRule,
+    RoutingOverrideRule,
     RoutingRuleSet,
 )
 from pgl_sorting_engine.runner import run_sorting
@@ -79,6 +81,8 @@ __all__ = [
     "MultipleLocationAssignmentError",
     "Pathologist",
     "PrefixRoutingRule",
+    "RoutingOverrideMode",
+    "RoutingOverrideRule",
     "RoutingConflictError",
     "RoutingRuleSet",
     "SortingEngineError",

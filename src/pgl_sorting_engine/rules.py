@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 from pgl_sorting_engine.enums import (
     LocationName,
+    RoutingOverrideMode,
     SubspecialtyRequirement,
 )
 from pgl_sorting_engine.exceptions import (
@@ -21,24 +22,20 @@ from pgl_sorting_engine.validation import (
     _normalize_two_letter_code,
 )
 
+SPECIAL_ONLY_LOCATIONS = frozenset(
+    {LocationName.TEXAS, LocationName.OMEGA}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CaseTypeRule:
-    """
-    Define the subspecialty behavior associated with a case type.
-
-    Attributes:
-        case_type: Two-letter case-type code from the LIS.
-        subspecialty: Subspecialty needed or preferred for the case.
-        requirement: Whether coverage is required, preferred, or unnecessary.
-    """
+    """Define the subspecialty behavior associated with a case type."""
 
     case_type: str
     subspecialty: str | None
     requirement: SubspecialtyRequirement
 
     def __post_init__(self) -> None:
-        """Normalize and validate the case-type rule."""
         normalized_case_type = _normalize_two_letter_code(
             self.case_type,
             "Case type",
@@ -51,15 +48,11 @@ class CaseTypeRule:
                 f"Invalid subspecialty requirement: {self.requirement!r}."
             ) from exc
 
-        normalized_subspecialty: str | None
-
-        if self.subspecialty is None:
-            normalized_subspecialty = None
-        else:
-            normalized_subspecialty = _normalize_label(
-                self.subspecialty,
-                "Subspecialty",
-            )
+        normalized_subspecialty = (
+            None
+            if self.subspecialty is None
+            else _normalize_label(self.subspecialty, "Subspecialty")
+        )
 
         if (
             normalized_requirement is SubspecialtyRequirement.NOT_REQUIRED
@@ -86,15 +79,7 @@ class CaseTypeRule:
 
 @dataclass(frozen=True, slots=True)
 class PrefixRoutingRule:
-    """
-    Define which locations may receive accessions with a particular prefix.
-
-    Attributes:
-        prefix: Two-letter accession prefix.
-        allowed_locations: Locations permitted to receive the prefix.
-        required_location: Optional mandatory destination.
-        preferred_locations: Optional ordered list of preferred destinations.
-    """
+    """Define which locations may receive a particular prefix."""
 
     prefix: str
     allowed_locations: frozenset[LocationName]
@@ -102,7 +87,6 @@ class PrefixRoutingRule:
     preferred_locations: tuple[LocationName, ...] = ()
 
     def __post_init__(self) -> None:
-        """Normalize and validate the prefix-routing rule."""
         normalized_prefix = _normalize_two_letter_code(
             self.prefix,
             "Prefix",
@@ -141,17 +125,17 @@ class PrefixRoutingRule:
 
         if len(normalized_preferred) != len(set(normalized_preferred)):
             raise ConfigurationError(
-                f"Prefix {normalized_prefix} contains duplicate preferred locations."
+                f"Prefix {normalized_prefix} contains duplicate preferred "
+                "locations."
             )
 
         invalid_preferences = set(normalized_preferred) - normalized_allowed
-
         if invalid_preferences:
             invalid_names = ", ".join(
                 sorted(location.value for location in invalid_preferences)
             )
             raise ConfigurationError(
-                f"Preferred locations must also be allowed for prefix "
+                "Preferred locations must also be allowed for prefix "
                 f"{normalized_prefix}: {invalid_names}."
             )
 
@@ -168,17 +152,145 @@ class PrefixRoutingRule:
 
 
 @dataclass(frozen=True, slots=True)
-class RoutingRuleSet:
-    """
-    Immutable collection of case-type, prefix, and hospital routing rules.
+class RoutingOverrideRule:
+    """Configure a prefix/case-type routing override.
 
-    Duplicate codes and hospital names are rejected rather than silently
-    replacing an earlier rule.
+    ``hospital`` is optional. A hospital-specific rule takes precedence over a
+    general rule for the same prefix/case-type pair.
     """
+
+    rule_name: str
+    prefix: str
+    case_type: str
+    mode: RoutingOverrideMode
+    hospital: str | None = None
+    destination_location: LocationName | None = None
+    preferred_locations: tuple[LocationName, ...] = ()
+    required_subspecialty: str | None = None
+
+    def __post_init__(self) -> None:
+        name = str(self.rule_name).strip()
+        if not name:
+            raise ConfigurationError("Routing override rule name cannot be blank.")
+
+        prefix = _normalize_two_letter_code(self.prefix, "Prefix")
+        case_type = _normalize_two_letter_code(self.case_type, "Case type")
+        hospital = (
+            None
+            if self.hospital is None or not str(self.hospital).strip()
+            else _normalize_label(self.hospital, "Hospital")
+        )
+
+        try:
+            mode = RoutingOverrideMode(self.mode)
+            destination = (
+                None
+                if self.destination_location is None
+                else LocationName(self.destination_location)
+            )
+            preferred = tuple(
+                LocationName(location) for location in self.preferred_locations
+            )
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"Routing override {name!r} contains an invalid value."
+            ) from exc
+
+        subspecialty = (
+            None
+            if self.required_subspecialty is None
+            or not str(self.required_subspecialty).strip()
+            else _normalize_label(
+                self.required_subspecialty,
+                "Required subspecialty",
+            )
+        )
+
+        if len(preferred) != len(set(preferred)):
+            raise ConfigurationError(
+                f"Routing override {name!r} contains duplicate preferred "
+                "locations."
+            )
+
+        if destination in SPECIAL_ONLY_LOCATIONS:
+            raise ConfigurationError(
+                f"Routing override {name!r} cannot route to "
+                f"{destination.value}; TEXAS and OMEGA are controlled by "
+                "fixed application rules."
+            )
+
+        invalid_preferred = set(preferred) & SPECIAL_ONLY_LOCATIONS
+        if invalid_preferred:
+            names = ", ".join(
+                sorted(location.value for location in invalid_preferred)
+            )
+            raise ConfigurationError(
+                f"Routing override {name!r} cannot prefer special-only "
+                f"locations: {names}."
+            )
+
+        destination_modes = {
+            RoutingOverrideMode.ALWAYS_REQUIRED,
+            RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT,
+            RoutingOverrideMode.PREFERRED_UNTIL_TARGET,
+        }
+
+        if mode in destination_modes and destination is None:
+            raise ConfigurationError(
+                f"Routing override {name!r} requires a destination_location."
+            )
+
+        if mode not in destination_modes and destination is not None:
+            raise ConfigurationError(
+                f"Routing override {name!r} must leave destination_location "
+                f"blank for mode {mode.value}."
+            )
+
+        if mode is RoutingOverrideMode.PREFERRED and not preferred:
+            raise ConfigurationError(
+                f"Routing override {name!r} requires at least one "
+                "preferred location."
+            )
+
+        if mode is not RoutingOverrideMode.PREFERRED and preferred:
+            raise ConfigurationError(
+                f"Routing override {name!r} must leave preferred_locations "
+                f"blank for mode {mode.value}."
+            )
+
+        if (
+            mode is not RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT
+            and subspecialty is not None
+        ):
+            raise ConfigurationError(
+                f"Routing override {name!r} may specify "
+                "required_subspecialty only for "
+                "required_if_subspecialist_present."
+            )
+
+        object.__setattr__(self, "rule_name", name)
+        object.__setattr__(self, "prefix", prefix)
+        object.__setattr__(self, "case_type", case_type)
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "hospital", hospital)
+        object.__setattr__(self, "destination_location", destination)
+        object.__setattr__(self, "preferred_locations", preferred)
+        object.__setattr__(self, "required_subspecialty", subspecialty)
+
+    @property
+    def match_key(self) -> tuple[str | None, str, str]:
+        """Return the normalized rule-match key."""
+        return (self.hospital, self.prefix, self.case_type)
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRuleSet:
+    """Immutable collection of all routing rules."""
 
     case_type_rules: tuple[CaseTypeRule, ...]
     prefix_rules: tuple[PrefixRoutingRule, ...]
     hospital_rules: tuple[HospitalRoutingRule, ...] = ()
+    override_rules: tuple[RoutingOverrideRule, ...] = ()
 
     _case_type_index: Mapping[str, CaseTypeRule] = field(
         init=False,
@@ -192,40 +304,132 @@ class RoutingRuleSet:
         init=False,
         repr=False,
     )
+    _override_index: Mapping[
+        tuple[str | None, str, str],
+        RoutingOverrideRule,
+    ] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Build immutable lookup indexes and reject duplicate rules."""
         case_type_index: dict[str, CaseTypeRule] = {}
 
         for case_type_rule in self.case_type_rules:
             if case_type_rule.case_type in case_type_index:
                 raise DuplicateRuleError(
-                    f"Duplicate case-type rule found for "
+                    "Duplicate case-type rule found for "
                     f"{case_type_rule.case_type}."
                 )
 
-            case_type_index[case_type_rule.case_type] = case_type_rule
+            case_type_index[
+                case_type_rule.case_type
+            ] = case_type_rule
+
 
         prefix_index: dict[str, PrefixRoutingRule] = {}
 
         for prefix_rule in self.prefix_rules:
             if prefix_rule.prefix in prefix_index:
                 raise DuplicateRuleError(
-                    f"Duplicate prefix rule found for {prefix_rule.prefix}."
+                    "Duplicate prefix rule found for "
+                    f"{prefix_rule.prefix}."
                 )
 
-            prefix_index[prefix_rule.prefix] = prefix_rule
+            prefix_index[
+                prefix_rule.prefix
+            ] = prefix_rule
+
 
         hospital_index: dict[str, HospitalRoutingRule] = {}
 
         for hospital_rule in self.hospital_rules:
             if hospital_rule.hospital in hospital_index:
                 raise DuplicateRuleError(
-                    f"Duplicate hospital rule found for "
+                    "Duplicate hospital rule found for "
                     f"{hospital_rule.hospital}."
                 )
 
-            hospital_index[hospital_rule.hospital] = hospital_rule
+            hospital_index[
+                hospital_rule.hospital
+            ] = hospital_rule
+
+
+        override_index: dict[
+            tuple[str | None, str, str],
+            RoutingOverrideRule,
+        ] = {}
+
+        for override_rule in self.override_rules:
+            if override_rule.match_key in override_index:
+                previous = override_index[
+                    override_rule.match_key
+                ]
+
+                scope = (
+                    override_rule.hospital
+                    or "all hospitals"
+                )
+
+                raise DuplicateRuleError(
+                    "Duplicate routing override for "
+                    f"{scope}, "
+                    f"{override_rule.prefix}-"
+                    f"{override_rule.case_type}: "
+                    f"{previous.rule_name!r} and "
+                    f"{override_rule.rule_name!r}."
+                )
+
+            if override_rule.prefix not in prefix_index:
+                raise ConfigurationError(
+                    f"Routing override "
+                    f"{override_rule.rule_name!r} "
+                    "references unknown prefix "
+                    f"{override_rule.prefix}."
+                )
+
+            if (
+                override_rule.case_type
+                not in case_type_index
+            ):
+                raise ConfigurationError(
+                    f"Routing override "
+                    f"{override_rule.rule_name!r} "
+                    "references unknown case type "
+                    f"{override_rule.case_type}."
+                )
+
+            if (
+                override_rule.hospital is not None
+                and override_rule.hospital
+                not in hospital_index
+            ):
+                raise ConfigurationError(
+                    f"Routing override "
+                    f"{override_rule.rule_name!r} "
+                    "references unknown hospital "
+                    f"{override_rule.hospital}."
+                )
+
+            if (
+                override_rule.mode
+                is RoutingOverrideMode.REQUIRED_IF_SUBSPECIALIST_PRESENT
+                and override_rule.required_subspecialty
+                is None
+                and case_type_index[
+                    override_rule.case_type
+                ].subspecialty
+                is None
+            ):
+                raise ConfigurationError(
+                    f"Routing override "
+                    f"{override_rule.rule_name!r} "
+                    "must specify a required_subspecialty "
+                    "because case type "
+                    f"{override_rule.case_type} "
+                    "has no associated subspecialty."
+                )
+
+            override_index[
+                override_rule.match_key
+            ] = override_rule
 
         object.__setattr__(
             self,
@@ -242,63 +446,63 @@ class RoutingRuleSet:
             "_hospital_index",
             MappingProxyType(hospital_index),
         )
+        object.__setattr__(
+            self,
+            "_override_index",
+            MappingProxyType(override_index),
+        )
 
     def get_case_type_rule(self, case_type: str) -> CaseTypeRule:
-        """
-        Return the rule for a case type.
+        normalized = _normalize_two_letter_code(case_type, "Case type")
+        try:
+            return self._case_type_index[normalized]
+        except KeyError as exc:
+            raise UnknownCaseTypeError(
+                f"No routing rule is configured for case type {normalized}."
+            ) from exc
 
-        Raises:
-            UnknownCaseTypeError: If the code has no configured rule.
-        """
+    def get_prefix_rule(self, prefix: str) -> PrefixRoutingRule:
+        normalized = _normalize_two_letter_code(prefix, "Prefix")
+        try:
+            return self._prefix_index[normalized]
+        except KeyError as exc:
+            raise UnknownPrefixError(
+                f"No routing rule is configured for prefix {normalized}."
+            ) from exc
+
+    def get_hospital_rule(self, hospital: str) -> HospitalRoutingRule:
+        normalized = _normalize_label(hospital, "Hospital")
+        try:
+            return self._hospital_index[normalized]
+        except KeyError as exc:
+            raise UnknownHospitalError(
+                f"No routing rule is configured for hospital {normalized}."
+            ) from exc
+
+    def find_override_rule(
+        self,
+        hospital: str,
+        prefix: str,
+        case_type: str,
+    ) -> RoutingOverrideRule | None:
+        """Return the most specific matching override rule."""
+        normalized_hospital = _normalize_label(hospital, "Hospital")
+        normalized_prefix = _normalize_two_letter_code(prefix, "Prefix")
         normalized_case_type = _normalize_two_letter_code(
             case_type,
             "Case type",
         )
 
-        try:
-            return self._case_type_index[normalized_case_type]
-        except KeyError as exc:
-            raise UnknownCaseTypeError(
-                f"No routing rule is configured for case type "
-                f"{normalized_case_type}."
-            ) from exc
-
-    def get_prefix_rule(self, prefix: str) -> PrefixRoutingRule:
-        """
-        Return the rule for an accession prefix.
-
-        Raises:
-            UnknownPrefixError: If the prefix has no configured rule.
-        """
-        normalized_prefix = _normalize_two_letter_code(
-            prefix,
-            "Prefix",
+        exact_key = (
+            normalized_hospital,
+            normalized_prefix,
+            normalized_case_type,
         )
-
-        try:
-            return self._prefix_index[normalized_prefix]
-        except KeyError as exc:
-            raise UnknownPrefixError(
-                f"No routing rule is configured for prefix "
-                f"{normalized_prefix}."
-            ) from exc
-
-    def get_hospital_rule(self, hospital: str) -> HospitalRoutingRule:
-        """
-        Return the routing rule for an originating hospital.
-
-        Raises:
-            UnknownHospitalError: If no rule exists for the hospital.
-        """
-        normalized_hospital = _normalize_label(
-            hospital,
-            "Hospital",
+        general_key = (
+            None,
+            normalized_prefix,
+            normalized_case_type,
         )
-
-        try:
-            return self._hospital_index[normalized_hospital]
-        except KeyError as exc:
-            raise UnknownHospitalError(
-                f"No routing rule is configured for hospital "
-                f"{normalized_hospital}."
-            ) from exc
+        return self._override_index.get(exact_key) or self._override_index.get(
+            general_key
+        )
