@@ -34,3 +34,9 @@ logs/
 
 # Windows download metadata
 *:Zone.Identifier
+
+# GUI / PyInstaller build artifacts
+.venv-gui/
+build/
+dist/
+*.spec

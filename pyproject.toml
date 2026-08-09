@@ -16,12 +16,17 @@ dependencies = [
 [project.scripts]
 pgl-create-templates = "pgl_sorting_engine.templates:main"
 pgl-sort = "pgl_sorting_engine.runner:main"
+pgl-sort-gui = "pgl_sorting_engine.gui:main"
 
 [project.optional-dependencies]
 dev = [
     "mypy>=1.10",
     "pytest>=8.0",
     "ruff>=0.6",
+]
+
+gui-build = [
+    "pyinstaller>=6.0",
 ]
 
 
