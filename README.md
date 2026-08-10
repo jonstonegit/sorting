@@ -751,8 +751,8 @@ Implemented:
 
 Potential future enhancements:
 
-- database-backed configuration and operational data
+- integration with LigoLab 
 - simplified GUI-based configuration maintenance
 - automatic daily-template refresh
-- automated report delivery
+- automated report delivery to pathologists
 - additional reporting and operational integrations
