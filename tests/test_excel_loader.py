@@ -434,3 +434,64 @@ def test_optional_routing_overrides_are_loaded(
     rule = data.configuration.override_rules[0]
     assert rule.rule_name == "AB-GI to OLOL up to 40"
     assert rule.weight_cap == Decimal("40")
+
+def test_wide_staffing_layout_is_loaded(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_workbook(configuration_path)
+    create_daily_workbook(daily_path)
+
+    workbook = load_workbook(daily_path)
+    workbook.remove(workbook["Staffing"])
+    staffing = workbook.create_sheet("Staffing")
+    staffing.append(["location", "pathologist_1", "pathologist_2"])
+    staffing.append(["OLOL", "JS", None])
+    staffing.append(["BRG", None, None])
+    staffing.append(["WH", None, None])
+    staffing.append(["MET", None, None])
+    staffing.append(["TEXAS", None, None])
+    staffing.append(["OMEGA", None, None])
+    workbook.save(daily_path)
+    workbook.close()
+
+    data = load_sorting_workbooks(
+        configuration_path=configuration_path,
+        daily_path=daily_path,
+    )
+
+    assert len(data.daily.staffing) == 1
+    assert data.daily.staffing[0].location is LocationName.OLOL
+    assert data.daily.staffing[0].pathologist_ids == ("JS",)
+
+
+def test_wide_staffing_rejects_pathologist_at_two_locations(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_workbook(configuration_path)
+    create_daily_workbook(daily_path)
+
+    workbook = load_workbook(daily_path)
+    workbook.remove(workbook["Staffing"])
+    staffing = workbook.create_sheet("Staffing")
+    staffing.append(["location", "pathologist_1", "pathologist_2"])
+    staffing.append(["OLOL", "JS", None])
+    staffing.append(["MET", "JS", None])
+    workbook.save(daily_path)
+    workbook.close()
+
+    with pytest.raises(SpreadsheetValidationError) as exc_info:
+        load_sorting_workbooks(
+            configuration_path=configuration_path,
+            daily_path=daily_path,
+        )
+
+    message = str(exc_info.value)
+    assert "DAILY / Staffing row 3" in message
+    assert "already assigned to OLOL on row 2" in message
+

@@ -75,10 +75,12 @@ ACCESSION_HEADERS = (
     "weight",
 )
 
-STAFFING_HEADERS = (
+LEGACY_STAFFING_HEADERS = (
     "location",
     "pathologist_id",
 )
+STAFFING_LOCATION_HEADER = "location"
+STAFFING_PATHOLOGIST_PREFIX = "pathologist_"
 
 ASSIGNMENT_SETTINGS_SHEET = "AssignmentSettings"
 ASSIGNMENT_SETTINGS_HEADERS = (
@@ -1069,7 +1071,206 @@ def _load_staffing(
     known_pathologist_ids: frozenset[str],
     issues: list[SpreadsheetIssue],
 ) -> list[DailyLocationStaffing]:
-    """Load one daily pathologist-location assignment per row."""
+    """Load daily staffing from the wide or legacy worksheet layout."""
+    if "Staffing" not in workbook.sheetnames:
+        issues.append(
+            SpreadsheetIssue(
+                workbook=DAILY_WORKBOOK,
+                sheet="Staffing",
+                row_number=None,
+                message="Required worksheet is missing.",
+            )
+        )
+        return []
+
+    worksheet = workbook["Staffing"]
+    row_iterator = worksheet.iter_rows(values_only=True)
+    header_row = next(row_iterator, None)
+
+    if header_row is None:
+        issues.append(
+            SpreadsheetIssue(
+                workbook=DAILY_WORKBOOK,
+                sheet="Staffing",
+                row_number=None,
+                message="Worksheet is empty.",
+            )
+        )
+        return []
+
+    normalized_headers = tuple(
+        _normalize_header(value)
+        for value in header_row
+    )
+
+    if "pathologist_id" in normalized_headers:
+        return _load_legacy_staffing(
+            workbook=workbook,
+            known_pathologist_ids=known_pathologist_ids,
+            issues=issues,
+        )
+
+    header_indexes: dict[str, int] = {}
+
+    for column_index, header in enumerate(normalized_headers):
+        if not header:
+            continue
+
+        if header in header_indexes:
+            issues.append(
+                SpreadsheetIssue(
+                    workbook=DAILY_WORKBOOK,
+                    sheet="Staffing",
+                    row_number=1,
+                    message=f"Duplicate column heading {header!r}.",
+                )
+            )
+            continue
+
+        header_indexes[header] = column_index
+
+    location_index = header_indexes.get(STAFFING_LOCATION_HEADER)
+
+    if location_index is None:
+        issues.append(
+            SpreadsheetIssue(
+                workbook=DAILY_WORKBOOK,
+                sheet="Staffing",
+                row_number=1,
+                message="Missing required column: location.",
+            )
+        )
+        return []
+
+    slot_indexes = tuple(
+        column_index
+        for header, column_index in header_indexes.items()
+        if _is_staffing_slot_header(header)
+    )
+
+    if not slot_indexes:
+        issues.append(
+            SpreadsheetIssue(
+                workbook=DAILY_WORKBOOK,
+                sheet="Staffing",
+                row_number=1,
+                message=(
+                    "Missing pathologist staffing columns. Expected "
+                    "headings such as pathologist_1 and pathologist_2."
+                ),
+            )
+        )
+        return []
+
+    assignments: dict[LocationName, list[str]] = {}
+    seen_locations: dict[LocationName, int] = {}
+    seen_pathologists: dict[str, tuple[LocationName, int]] = {}
+
+    for row_number, row in enumerate(row_iterator, start=2):
+        if all(_is_blank(value) for value in row):
+            continue
+
+        try:
+            location_value = (
+                row[location_index]
+                if location_index < len(row)
+                else None
+            )
+            location = _parse_location(location_value)
+
+            previous_location_row = seen_locations.get(location)
+
+            if previous_location_row is not None:
+                raise ValueError(
+                    f"Location {location.value} already appears on "
+                    f"row {previous_location_row}."
+                )
+
+            pathologist_ids: list[str] = []
+            row_pathologists: set[str] = set()
+
+            for column_index in slot_indexes:
+                value = (
+                    row[column_index]
+                    if column_index < len(row)
+                    else None
+                )
+
+                if _is_blank(value):
+                    continue
+
+                pathologist_id = _required_text(
+                    value,
+                    "Pathologist ID",
+                ).upper()
+
+                if pathologist_id not in known_pathologist_ids:
+                    raise ValueError(
+                        f"Pathologist ID {pathologist_id!r} is not "
+                        "present in the configuration workbook."
+                    )
+
+                if pathologist_id in row_pathologists:
+                    raise ValueError(
+                        f"Pathologist {pathologist_id!r} is selected more "
+                        f"than once for {location.value}."
+                    )
+
+                previous_assignment = seen_pathologists.get(
+                    pathologist_id
+                )
+
+                if previous_assignment is not None:
+                    previous_location, previous_row = previous_assignment
+                    raise ValueError(
+                        f"Pathologist {pathologist_id!r} is already "
+                        f"assigned to {previous_location.value} on "
+                        f"row {previous_row}."
+                    )
+
+                row_pathologists.add(pathologist_id)
+                pathologist_ids.append(pathologist_id)
+
+            seen_locations[location] = row_number
+
+            if not pathologist_ids:
+                continue
+
+            assignments[location] = pathologist_ids
+
+            for pathologist_id in pathologist_ids:
+                seen_pathologists[pathologist_id] = (
+                    location,
+                    row_number,
+                )
+
+        except (TypeError, ValueError, ConfigurationError) as exc:
+            _append_row_issue(
+                issues=issues,
+                workbook=DAILY_WORKBOOK,
+                sheet="Staffing",
+                row_number=row_number,
+                exc=exc,
+            )
+
+    return _build_staffing_records(assignments, issues)
+
+
+def _is_staffing_slot_header(header: str) -> bool:
+    """Return whether a normalized heading is pathologist_<number>."""
+    if not header.startswith(STAFFING_PATHOLOGIST_PREFIX):
+        return False
+
+    suffix = header.removeprefix(STAFFING_PATHOLOGIST_PREFIX)
+    return suffix.isdigit() and int(suffix) > 0
+
+
+def _load_legacy_staffing(
+    workbook: Any,
+    known_pathologist_ids: frozenset[str],
+    issues: list[SpreadsheetIssue],
+) -> list[DailyLocationStaffing]:
+    """Load the original one-pathologist-per-row staffing layout."""
     assignments: dict[LocationName, list[str]] = {}
     seen_pathologists: dict[str, tuple[LocationName, int]] = {}
 
@@ -1077,7 +1278,7 @@ def _load_staffing(
         workbook=workbook,
         workbook_label=DAILY_WORKBOOK,
         sheet_name="Staffing",
-        required_headers=STAFFING_HEADERS,
+        required_headers=LEGACY_STAFFING_HEADERS,
         issues=issues,
     ):
         try:
@@ -1099,7 +1300,6 @@ def _load_staffing(
 
             if previous_assignment is not None:
                 previous_location, previous_row = previous_assignment
-
                 raise ValueError(
                     f"Pathologist {pathologist_id!r} is already "
                     f"assigned to {previous_location.value} on "
@@ -1110,7 +1310,6 @@ def _load_staffing(
                 location,
                 row_number,
             )
-
             assignments.setdefault(location, []).append(
                 pathologist_id
             )
@@ -1124,6 +1323,14 @@ def _load_staffing(
                 exc=exc,
             )
 
+    return _build_staffing_records(assignments, issues)
+
+
+def _build_staffing_records(
+    assignments: dict[LocationName, list[str]],
+    issues: list[SpreadsheetIssue],
+) -> list[DailyLocationStaffing]:
+    """Convert parsed location assignments into domain records."""
     records: list[DailyLocationStaffing] = []
 
     for location in LocationName:

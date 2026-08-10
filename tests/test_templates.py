@@ -110,12 +110,29 @@ def test_daily_template_has_expected_sheets(
         "weight",
     ]
 
-    assert [
+    staffing_headers = [
         cell.value
         for cell in workbook["Staffing"][1]
-    ] == [
+    ]
+    assert staffing_headers == [
         "location",
-        "pathologist_id",
+        "pathologist_1",
+        "pathologist_2",
+        "pathologist_3",
+        "pathologist_4",
+        "pathologist_5",
+        "pathologist_6",
+    ]
+    assert [
+        workbook["Staffing"].cell(row=row, column=1).value
+        for row in range(2, 8)
+    ] == [
+        "OLOL",
+        "BRG",
+        "WH",
+        "MET",
+        "TEXAS",
+        "OMEGA",
     ]
 
     assert workbook["Accessions"].freeze_panes == "A2"
@@ -209,3 +226,42 @@ def test_routing_override_template_includes_weight_cap(tmp_path: Path) -> None:
             for row in range(2, workbook["Lists"].max_row + 1)
         }
     )
+
+def test_daily_template_uses_configuration_pathologist_dropdowns(
+    tmp_path: Path,
+) -> None:
+    configuration_path = tmp_path / "sorting_configuration.xlsx"
+    daily_path = tmp_path / "daily_sorting.xlsx"
+
+    create_configuration_template(configuration_path)
+    workbook = load_workbook(configuration_path)
+    worksheet = workbook["Pathologists"]
+    worksheet["A2"] = "JS"
+    worksheet["B2"] = "Dr. Smith"
+    worksheet["C2"] = "GI"
+    worksheet.append(["AB", "Dr. Brown", "BREAST"])
+    workbook.save(configuration_path)
+    workbook.close()
+
+    create_daily_template(
+        daily_path,
+        configuration_path=configuration_path,
+    )
+
+    workbook = load_workbook(daily_path)
+    lists = workbook["Lists"]
+    staffing = workbook["Staffing"]
+
+    assert lists["B2"].value is None
+    assert lists["B3"].value == "JS"
+    assert lists["B4"].value == "AB"
+    assert "PathologistIDs" in workbook.defined_names
+
+    staffing_validations = list(
+        staffing.data_validations.dataValidation
+    )
+    assert len(staffing_validations) == 1
+    assert staffing_validations[0].formula1 == "=PathologistIDs"
+
+    workbook.close()
+

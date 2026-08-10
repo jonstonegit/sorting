@@ -4,7 +4,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 from typing import Any
 
-from openpyxl import Workbook  # type: ignore[import-untyped]
+from openpyxl import Workbook, load_workbook  # type: ignore[import-untyped]
 from openpyxl.comments import Comment  # type: ignore[import-untyped]
 from openpyxl.styles import (  # type: ignore[import-untyped]
     Alignment,
@@ -15,6 +15,9 @@ from openpyxl.styles import (  # type: ignore[import-untyped]
 )
 from openpyxl.utils import (  # type: ignore[import-untyped]
     get_column_letter,
+)
+from openpyxl.workbook.defined_name import (  # type: ignore[import-untyped]
+    DefinedName,
 )
 from openpyxl.worksheet.datavalidation import (  # type: ignore[import-untyped]
     DataValidation,
@@ -28,6 +31,8 @@ CONFIGURATION_FILENAME = "sorting_configuration.xlsx"
 DAILY_FILENAME = "daily_sorting.xlsx"
 
 MAX_INPUT_ROW = 1000
+MIN_STAFFING_SLOTS = 6
+PATHOLOGIST_LIST_NAME = "PathologistIDs"
 
 ASSIGNMENT_SETTINGS_HEADERS = (
     "met_weight_per_pathologist",
@@ -122,7 +127,10 @@ def create_sorting_templates(
     daily_path = output_path / DAILY_FILENAME
 
     create_configuration_template(configuration_path)
-    create_daily_template(daily_path)
+    create_daily_template(
+        daily_path,
+        configuration_path=configuration_path,
+    )
 
     return configuration_path, daily_path
 
@@ -323,17 +331,30 @@ def create_configuration_template(
 
 def create_daily_template(
     output_path: str | Path,
+    configuration_path: str | Path | None = None,
 ) -> Path:
     """
     Create the workbook used for one morning's sorting run.
 
-    The workbook contains:
+    When ``configuration_path`` is provided, pathologist IDs are read from
+    its Pathologists sheet and used as the Staffing dropdown choices.
 
+    The workbook contains:
     * Accessions
     * Staffing
     """
     path = Path(output_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    pathologist_ids = (
+        _read_pathologist_ids(configuration_path)
+        if configuration_path is not None
+        else ()
+    )
+    staffing_slot_count = max(
+        MIN_STAFFING_SLOTS,
+        len(pathologist_ids),
+    )
 
     workbook = Workbook()
 
@@ -345,7 +366,14 @@ def create_daily_template(
     lists = workbook.create_sheet("Lists")
 
     _build_daily_instructions(instructions)
-    _build_daily_lists(lists)
+    pathologist_list_last_row = _build_daily_lists(
+        lists,
+        pathologist_ids=pathologist_ids,
+    )
+    _define_pathologist_list(
+        workbook,
+        last_row=pathologist_list_last_row,
+    )
 
     _configure_input_sheet(
         worksheet=accessions,
@@ -360,16 +388,9 @@ def create_daily_template(
         table_name="AccessionsTable",
         tab_color="4472C4",
     )
-
-    _configure_input_sheet(
+    _configure_staffing_sheet(
         worksheet=staffing,
-        headers=(
-            "location",
-            "pathologist_id",
-        ),
-        widths=(18, 22),
-        table_name="StaffingTable",
-        tab_color="70AD47",
+        slot_count=staffing_slot_count,
     )
 
     _add_two_letter_validation(
@@ -377,7 +398,6 @@ def create_daily_template(
         cell_range=f"B2:B{MAX_INPUT_ROW}",
         field_name="prefix",
     )
-
     _add_two_letter_validation(
         worksheet=accessions,
         cell_range=f"C2:C{MAX_INPUT_ROW}",
@@ -390,18 +410,26 @@ def create_daily_template(
         field_name="Accession weight",
     )
 
-    location_formula = f'"{",".join(LOCATIONS)}"'
-
+    last_staffing_column = get_column_letter(
+        staffing_slot_count + 1
+    )
     _add_list_validation(
         worksheet=staffing,
-        cell_range=f"A2:A{MAX_INPUT_ROW}",
-        formula=location_formula,
-        prompt="Select the pathologist's location for today.",
-        error="Select a valid sorting location.",
+        cell_range=(
+            f"B2:{last_staffing_column}{len(LOCATIONS) + 1}"
+        ),
+        formula=f"={PATHOLOGIST_LIST_NAME}",
+        prompt=(
+            "Select a pathologist for this location, or leave the cell "
+            "blank."
+        ),
+        error=(
+            "Select a pathologist from the configured roster or leave "
+            "the cell blank."
+        ),
     )
 
     accessions["E2"].number_format = "0.00"
-
     accessions["A1"].comment = Comment(
         "Enter each accession number only once.",
         "PGL Sorting Engine",
@@ -422,15 +450,176 @@ def create_daily_template(
         "Enter a positive numeric workload weight.",
         "PGL Sorting Engine",
     )
-    staffing["B1"].comment = Comment(
-        "Pathologist ID must match the configuration workbook.",
+    staffing["A1"].comment = Comment(
+        "Locations are fixed. Choose today's pathologists across each row.",
         "PGL Sorting Engine",
     )
-
+    staffing["B1"].comment = Comment(
+        "Choose a configured pathologist ID from the dropdown. Blank is "
+        "allowed; MET and OMEGA may have no pathologist on a given day.",
+        "PGL Sorting Engine",
+    )
     lists.sheet_state = "hidden"
 
     workbook.save(path)
     return path
+
+
+def _read_pathologist_ids(
+    configuration_path: str | Path,
+) -> tuple[str, ...]:
+    """Read unique pathologist IDs from a configuration workbook."""
+    path = Path(configuration_path).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Configuration workbook does not exist: {path}."
+        )
+
+    workbook = load_workbook(
+        filename=path,
+        read_only=True,
+        data_only=True,
+    )
+
+    try:
+        if "Pathologists" not in workbook.sheetnames:
+            raise ValueError(
+                "Configuration workbook is missing the Pathologists sheet."
+            )
+
+        worksheet = workbook["Pathologists"]
+        row_iterator = worksheet.iter_rows(values_only=True)
+        headers = next(row_iterator, None)
+
+        if headers is None:
+            raise ValueError(
+                "The Pathologists sheet is empty."
+            )
+
+        normalized_headers = [
+            ""
+            if value is None
+            else "_".join(
+                str(value).strip().lower().replace("-", " ").split()
+            )
+            for value in headers
+        ]
+
+        try:
+            pathologist_column = normalized_headers.index(
+                "pathologist_id"
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "The Pathologists sheet is missing the pathologist_id "
+                "column."
+            ) from exc
+
+        pathologist_ids: list[str] = []
+        seen_ids: set[str] = set()
+
+        for row in row_iterator:
+            if pathologist_column >= len(row):
+                continue
+
+            raw_value = row[pathologist_column]
+
+            if raw_value is None:
+                continue
+
+            pathologist_id = str(raw_value).strip().upper()
+
+            if not pathologist_id:
+                continue
+
+            if pathologist_id in seen_ids:
+                raise ValueError(
+                    f"Duplicate pathologist ID {pathologist_id!r} in "
+                    "the configuration workbook."
+                )
+
+            seen_ids.add(pathologist_id)
+            pathologist_ids.append(pathologist_id)
+
+        return tuple(pathologist_ids)
+    finally:
+        workbook.close()
+
+
+def _configure_staffing_sheet(
+    worksheet: Any,
+    slot_count: int,
+) -> None:
+    """Build one fixed staffing row per sorting location."""
+    headers = (
+        "location",
+        *(
+            f"pathologist_{slot_number}"
+            for slot_number in range(1, slot_count + 1)
+        ),
+    )
+
+    worksheet.sheet_view.showGridLines = False
+    worksheet.freeze_panes = "A2"
+    worksheet.sheet_properties.tabColor = "70AD47"
+    worksheet.append(list(headers))
+
+    for location in LOCATIONS:
+        worksheet.append(
+            [location, *([None] * slot_count)]
+        )
+
+    for cell in worksheet[1]:
+        cell.fill = HEADER_FILL
+        cell.font = WHITE_FONT
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+        cell.border = THIN_GRAY_BORDER
+
+    worksheet.row_dimensions[1].height = 24
+    worksheet.column_dimensions["A"].width = 18
+
+    for column_number in range(2, slot_count + 2):
+        column_letter = get_column_letter(column_number)
+        worksheet.column_dimensions[column_letter].width = 18
+
+    for row_number in range(2, len(LOCATIONS) + 2):
+        worksheet.row_dimensions[row_number].height = 22
+        worksheet.cell(
+            row=row_number,
+            column=1,
+        ).font = Font(bold=True)
+
+    last_column = get_column_letter(slot_count + 1)
+    table = Table(
+        displayName="StaffingTable",
+        ref=f"A1:{last_column}{len(LOCATIONS) + 1}",
+    )
+    table.tableStyleInfo = TableStyleInfo(
+        name="TableStyleMedium2",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=True,
+        showColumnStripes=False,
+    )
+    worksheet.add_table(table)
+
+
+def _define_pathologist_list(
+    workbook: Any,
+    last_row: int,
+) -> None:
+    """Create the workbook-level name used by staffing dropdowns."""
+    defined_name = DefinedName(
+        PATHOLOGIST_LIST_NAME,
+        attr_text=(
+            f"'Lists'!$B$2:$B${last_row}"
+        ),
+    )
+    workbook.defined_names.add(defined_name)
 
 
 def _configure_input_sheet(
@@ -608,9 +797,13 @@ def _build_configuration_lists(worksheet: Any) -> None:
         )
 
 
-def _build_daily_lists(worksheet: Any) -> None:
-    """Populate validation choices for the daily workbook."""
+def _build_daily_lists(
+    worksheet: Any,
+    pathologist_ids: tuple[str, ...] = (),
+) -> int:
+    """Populate hidden validation choices for the daily workbook."""
     worksheet["A1"] = "Locations"
+    worksheet["B1"] = PATHOLOGIST_LIST_NAME
 
     for row_number, location in enumerate(LOCATIONS, start=2):
         worksheet.cell(
@@ -618,6 +811,19 @@ def _build_daily_lists(worksheet: Any) -> None:
             column=1,
             value=location,
         )
+
+    # B2 is intentionally blank so an empty dropdown choice is available.
+    for row_number, pathologist_id in enumerate(
+        pathologist_ids,
+        start=3,
+    ):
+        worksheet.cell(
+            row=row_number,
+            column=2,
+            value=pathologist_id,
+        )
+
+    return max(2, len(pathologist_ids) + 2)
 
 
 def _add_configuration_comments(
@@ -829,13 +1035,15 @@ def _build_daily_instructions(
         ),
         (
             "Staffing",
-            "Enter one row per pathologist working that day. A location "
-            "may appear on multiple rows.",
+            "Each sorting location has one row. Choose today's pathologists "
+            "from the dropdown cells across that row.",
         ),
         (
             "Pathologist IDs",
-            "Each ID must exist in the Pathologists sheet of the "
-            "configuration workbook.",
+            "Dropdown choices come from the Pathologists sheet when the "
+            "daily template is created from a configuration workbook. "
+            "Unused cells may be left blank, including all MET or OMEGA "
+            "slots when those locations are unstaffed.",
         ),
         (
             "Routing values",
