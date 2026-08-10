@@ -34,7 +34,7 @@ SPECIAL_ONLY_LOCATIONS = frozenset(
     }
 )
 TEXAS_CASE_TYPES = frozenset({"DP", "DS"})
-OMEGA_HOSPITAL = "Omega Hospital"
+OMEGA_HOSPITAL = "Omega Hospital - Metairie"
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,10 +224,10 @@ class SortingEngine:
     Assign accessions according to special rules and weighted balancing.
 
     Assignment order:
-
-    1. DP and DS cases go to TEXAS without a workload target.
-    2. When exactly one pathologist is at OMEGA, Omega Hospital cases go
-       to OMEGA. Otherwise OMEGA receives no work.
+    
+    1. When exactly one pathologist is at OMEGA, all
+    Omega Hospital - Metairie cases go to OMEGA.
+    2. Remaining DP and DS cases go to TEXAS without a workload target.
     3. Ordinary mandatory routing rules are applied.
     4. MET receives eligible work toward a fixed target equal to its
        pathologist count multiplied by ``met_weight_per_pathologist``.
@@ -452,6 +452,23 @@ class SortingEngine:
         for item in evaluated:
             accession = item.accession
 
+            # OMEGA has first priority when exactly one pathologist is staffed there.
+            # This includes DP and DS cases originating from Omega Hospital - Metairie.
+            if omega_rule_active and self._is_omega_hospital(accession):
+                forced.append(
+                    _ForcedAccession(
+                        item=item,
+                        location=LocationName.OMEGA,
+                        reason=(
+                            "Exactly one pathologist is staffed at OMEGA, "
+                            "so all Omega Hospital - Metairie cases are "
+                            "routed to OMEGA before other special rules."
+                        ),
+                    )
+                )
+                continue
+
+            # TEXAS receives all remaining DP and DS cases.
             if self._is_texas_case(accession):
                 if texas_count == 0:
                     unassigned.append(
@@ -475,19 +492,6 @@ class SortingEngine:
                         reason=(
                             f"Case type {accession.case_type} is routed "
                             "to TEXAS without a workload target."
-                        ),
-                    )
-                )
-                continue
-
-            if omega_rule_active and self._is_omega_hospital(accession):
-                forced.append(
-                    _ForcedAccession(
-                        item=item,
-                        location=LocationName.OMEGA,
-                        reason=(
-                            "Exactly one pathologist is staffed at OMEGA, "
-                            "so Omega Hospital cases are routed to OMEGA."
                         ),
                     )
                 )
