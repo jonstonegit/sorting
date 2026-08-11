@@ -753,6 +753,7 @@ Potential future enhancements:
 
 - integration with LigoLab 
 - simplified GUI-based configuration maintenance
+- add statistics of output containing AI analysis and summary 
 - automatic daily-template refresh
 - automated report delivery to pathologists
 - additional reporting and operational integrations
