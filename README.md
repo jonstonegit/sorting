@@ -10,7 +10,7 @@ A rules-based Python application for assigning daily pathology accessions to wor
 - location-specific business rules
 - weighted workload balancing
 
-The application uses a stable Excel configuration workbook plus a daily Excel input workbook and produces a dated Excel results report containing assignments, workload summaries, routing audit details, unassigned cases, routing-override matches, and distribution grids.
+For development, the application uses a stable Excel 'sorting_configuration' workbook plus a 'daily_sorting' Excel input workbook and produces a dated Excel results report containing assignments, workload summaries, routing audit details, unassigned cases, routing-override matches, and distribution grids. Future direction would be to integrate inputs and outputs with LigoLab software.
 
 The sorter can be run either through:
 
